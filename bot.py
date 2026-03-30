@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbol = "BTCUSDT"
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 interval = Client.KLINE_INTERVAL_1HOUR
 
 RISK_PER_TRADE = 0.01
@@ -35,16 +35,16 @@ def get_balance():
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# 📊 POSICIÓN
+# 📊 POSICIÓN ABIERTA GLOBAL
 def has_position():
-    positions = client.futures_position_information(symbol=symbol)
+    positions = client.futures_position_information()
     for p in positions:
         if float(p["positionAmt"]) != 0:
             return True
     return False
 
 # 📈 DATA
-def get_data():
+def get_data(symbol):
     klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
     df = pd.DataFrame(klines, columns=[
         "time","open","high","low","close","volume",
@@ -63,12 +63,11 @@ def calculate_qty(balance, entry, stop):
         return None
 
     qty = (risk_usdt / distance) * LEVERAGE
-
     return round(qty, 3)
 
 # 📊 SEÑAL
-def get_signal():
-    df = get_data()
+def get_signal(symbol):
+    df = get_data(symbol)
 
     df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
     df["ema200"] = ta.trend.ema_indicator(df["close"], window=200)
@@ -93,53 +92,52 @@ def open_trade():
         print("Ya hay posición abierta")
         return
 
-    entry, stop = get_signal()
+    for symbol in symbols:
+        entry, stop = get_signal(symbol)
 
-    if entry is None:
-        print("Sin señal")
-        send_msg("⏳ Sin señal")
-        return
+        if entry is None:
+            print(f"{symbol} → sin señal")
+            continue
 
-    balance = get_balance()
-    qty = calculate_qty(balance, entry, stop)
+        balance = get_balance()
+        qty = calculate_qty(balance, entry, stop)
 
-    if qty is None or qty <= 0:
-        print("Cantidad inválida")
-        return
+        if qty is None or qty <= 0:
+            continue
 
-    print(f"Balance: {balance} | Qty: {qty}")
+        print(f"ENTRANDO EN {symbol} | Qty: {qty}")
 
-    client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+        client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
 
-    # 🟢 COMPRA
-    client.futures_create_order(
-        symbol=symbol,
-        side="BUY",
-        type="MARKET",
-        quantity=qty
-    )
+        # 🟢 COMPRA
+        client.futures_create_order(
+            symbol=symbol,
+            side="BUY",
+            type="MARKET",
+            quantity=qty
+        )
 
-    # 🔴 STOP LOSS
-    client.futures_create_order(
-        symbol=symbol,
-        side="SELL",
-        type="STOP_MARKET",
-        stopPrice=round(stop, 2),
-        closePosition=True
-    )
+        # 🔴 STOP LOSS
+        client.futures_create_order(
+            symbol=symbol,
+            side="SELL",
+            type="STOP_MARKET",
+            stopPrice=round(stop, 2),
+            closePosition=True
+        )
 
-    # 🎯 TAKE PROFIT
-    tp = entry + (entry - stop) * 2
+        # 🎯 TAKE PROFIT
+        tp = entry + (entry - stop) * 2
 
-    client.futures_create_order(
-        symbol=symbol,
-        side="SELL",
-        type="TAKE_PROFIT_MARKET",
-        stopPrice=round(tp, 2),
-        closePosition=True
-    )
+        client.futures_create_order(
+            symbol=symbol,
+            side="SELL",
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=round(tp, 2),
+            closePosition=True
+        )
 
-    msg = f"""🟢 TRADE ABIERTO
+        msg = f"""🟢 TRADE ABIERTO
 Par: {symbol}
 Entry: {entry}
 SL: {stop}
@@ -147,8 +145,12 @@ TP: {round(tp,2)}
 Qty: {qty}
 """
 
-    print(msg)
-    send_msg(msg)
+        print(msg)
+        send_msg(msg)
+
+        return  # 🔥 SOLO 1 TRADE
+
+    send_msg("⏳ Sin señal en ningún par")
 
 # 🔁 LOOP
 while True:
