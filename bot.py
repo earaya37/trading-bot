@@ -14,9 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-# 🔥 PARES (controlados)
-symbols = ["BTCUSDT", "ETHUSDT", "BCHUSDT"]
-
+symbols = ["BTCUSDT", "ETHUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
@@ -54,7 +52,7 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 🔥 CÁLCULO PRO (CORREGIDO)
+# 🔥 CÁLCULO FINAL CORREGIDO
 def calculate_qty(balance, entry, stop):
     risk = balance * RISK_PER_TRADE
     distance = abs(entry - stop)
@@ -64,11 +62,17 @@ def calculate_qty(balance, entry, stop):
 
     qty = (risk / distance) * LEVERAGE
 
-    # 🔥 LIMITADOR DE SEGURIDAD
-    max_position_usdt = balance * 0.2  # usa máximo 20% del capital
+    # 🔥 límite máximo (20% capital)
+    max_position_usdt = balance * 0.2
     max_qty = max_position_usdt / entry
-
     qty = min(qty, max_qty)
+
+    # 🔥 mínimo Binance ($20)
+    min_notional = 20
+    min_qty = min_notional / entry
+
+    if qty < min_qty:
+        qty = min_qty
 
     return round(qty, 3)
 
