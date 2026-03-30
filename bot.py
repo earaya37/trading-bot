@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["BTCUSDT","ETHUSDT","BCHUSDT","SOLUSDT","XRPUSDT","ADAUSDT"]
+symbols = ["BTCUSDT", "ETHUSDT", "BCHUSDT", "SOLUSDT", "XRPUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
@@ -23,6 +23,7 @@ LEVERAGE = 5
 last_positions = {}
 wins = 0
 losses = 0
+cycle_count = 0
 
 def send_msg(text):
     try:
@@ -78,11 +79,10 @@ def get_data(symbol):
     df["close"] = df["close"].astype(float)
     df["low"] = df["low"].astype(float)
     df["high"] = df["high"].astype(float)
-    df["open"] = df["open"].astype(float)
     return df
 
-# 🧠 SEÑAL CON EXPLICACIÓN
-def get_signal(symbol):
+# 🧠 ANALIZA Y CALIFICA
+def analyze_symbol(symbol):
     df = get_data(symbol)
 
     df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
@@ -91,32 +91,58 @@ def get_signal(symbol):
 
     last = df.iloc[-1]
 
-    # FILTRO EMA
+    score = 0
+
     if last["ema50"] > last["ema200"]:
         trend = "LONG"
+        score += 1
     elif last["ema50"] < last["ema200"]:
         trend = "SHORT"
+        score += 1
     else:
-        print(f"{symbol} → ❌ EMA sin dirección")
-        return None, None, None
+        print(f"{symbol} → ❌ sin tendencia")
+        return None
 
-    # FILTRO RSI
-    if trend == "LONG" and not (last["rsi"] < 40):
-        print(f"{symbol} → ❌ RSI no válido para LONG ({round(last['rsi'],2)})")
-        return None, None, None
-
-    if trend == "SHORT" and not (last["rsi"] > 60):
-        print(f"{symbol} → ❌ RSI no válido para SHORT ({round(last['rsi'],2)})")
-        return None, None, None
-
-    print(f"{symbol} → ✅ SEÑAL {trend}")
-
-    if trend == "LONG":
-        return "LONG", last["close"], df["low"].tail(5).min()
+    if trend == "LONG" and last["rsi"] < 40:
+        score += (40 - last["rsi"]) / 10
+    elif trend == "SHORT" and last["rsi"] > 60:
+        score += (last["rsi"] - 60) / 10
     else:
-        return "SHORT", last["close"], df["high"].tail(5).max()
+        print(f"{symbol} → ❌ RSI no válido ({round(last['rsi'],2)})")
+        return None
 
-# 🧠 MÉTRICAS
+    print(f"{symbol} → score {round(score,2)}")
+
+    entry = last["close"]
+    stop = df["low"].tail(5).min() if trend == "LONG" else df["high"].tail(5).max()
+
+    return {
+        "symbol": symbol,
+        "side": trend,
+        "entry": entry,
+        "stop": stop,
+        "score": score
+    }
+
+# 🧠 ELIGE EL MEJOR
+def get_best_trade():
+    candidates = []
+
+    for symbol in symbols:
+        result = analyze_symbol(symbol)
+        if result:
+            candidates.append(result)
+
+    if not candidates:
+        print("⏳ Ninguna señal válida")
+        return None
+
+    best = max(candidates, key=lambda x: x["score"])
+    print(f"🏆 Mejor trade: {best['symbol']} ({round(best['score'],2)})")
+
+    return best
+
+# 📊 MÉTRICAS
 def check_closed_trades():
     global last_positions, wins, losses
 
@@ -168,106 +194,68 @@ Trades: {total}
                 "side": side
             }
 
-# 🔥 TRAILING
-def manage_trailing():
-    for symbol in symbols:
-        positions = client.futures_position_information(symbol=symbol)
-        if not positions:
-            continue
-
-        pos = positions[0]
-        amt = float(pos["positionAmt"])
-
-        if amt == 0:
-            continue
-
-        entry = float(pos["entryPrice"])
-        price = float(pos["markPrice"])
-
-        side = "LONG" if amt > 0 else "SHORT"
-        profit = (price - entry) if side == "LONG" else (entry - price)
-
-        if profit <= 0:
-            return
-
-        factor = 0.5
-
-        if side == "LONG":
-            new_sl = entry + profit * factor
-            sl_side = "SELL"
-        else:
-            new_sl = entry - profit * factor
-            sl_side = "BUY"
-
-        new_sl = adjust_price(symbol, new_sl)
-
-        try:
-            client.futures_create_order(
-                symbol=symbol,
-                side=sl_side,
-                type="STOP_MARKET",
-                stopPrice=new_sl,
-                closePosition=True
-            )
-        except:
-            pass
-
 # 🚀 EJECUCIÓN
 def open_trade():
     if has_any_position():
         print("🔒 Ya hay posición activa")
         return
 
-    for symbol in symbols:
-        side, entry, stop = get_signal(symbol)
+    best = get_best_trade()
 
-        if side is None:
-            continue
-
-        balance = get_balance()
-        risk = balance * RISK_PER_TRADE
-        distance = abs(entry - stop)
-
-        if distance == 0:
-            continue
-
-        qty = (risk / distance) * LEVERAGE
-        max_position = balance * 0.2
-        qty = min(qty, max_position / entry)
-
-        qty = adjust_qty(symbol, qty)
-
-        if qty * entry < 21:
-            print(f"{symbol} → ❌ menor a mínimo Binance")
-            continue
-
-        client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
-
-        if side == "LONG":
-            client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
-            sl_side = "SELL"
-        else:
-            client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
-            sl_side = "BUY"
-
-        stop = adjust_price(symbol, stop)
-
-        client.futures_create_order(symbol=symbol, side=sl_side, type="STOP_MARKET", stopPrice=stop, closePosition=True)
-
-        send_msg(f"🚀 {side} {symbol}")
-
+    if not best:
         return
 
-    print("⏳ Ninguna señal válida")
+    symbol = best["symbol"]
+    side = best["side"]
+    entry = best["entry"]
+    stop = best["stop"]
+
+    balance = get_balance()
+    risk = balance * RISK_PER_TRADE
+    distance = abs(entry - stop)
+
+    if distance == 0:
+        return
+
+    qty = (risk / distance) * LEVERAGE
+    max_position = balance * 0.2
+    qty = min(qty, max_position / entry)
+
+    qty = adjust_qty(symbol, qty)
+
+    if qty * entry < 21:
+        print(f"{symbol} → ❌ menor a mínimo")
+        return
+
+    client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+
+    if side == "LONG":
+        client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
+        sl_side = "SELL"
+    else:
+        client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
+        sl_side = "BUY"
+
+    stop = adjust_price(symbol, stop)
+
+    client.futures_create_order(symbol=symbol, side=sl_side, type="STOP_MARKET", stopPrice=stop, closePosition=True)
+
+    send_msg(f"🚀 {side} {symbol} (BEST)")
 
 # 🔁 LOOP
 while True:
     try:
-        print("\n--- NUEVO CICLO ---")
+        cycle_count += 1
+        print(f"\n--- CICLO {cycle_count} ---")
+
+        if cycle_count % 10 == 0:
+            send_msg("🤖 Bot activo y analizando mercado")
+
         check_closed_trades()
-        manage_trailing()
         open_trade()
+
         time.sleep(180)
+
     except Exception as e:
         print("Error:", e)
         send_msg(f"❌ {e}")
