@@ -1,5 +1,3 @@
-# 🔥 BOT CON TRAILING STOP
-
 from binance.client import Client
 import pandas as pd
 import ta
@@ -16,15 +14,11 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["ETHUSDT", "BCHUSDT"]
+symbols = ["ETHUSDT", "BCHUSDT", "BNBUSDT", "BTCUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
 LEVERAGE = 5
-
-last_positions = {}
-wins = 0
-losses = 0
 
 def send_msg(text):
     try:
@@ -61,10 +55,13 @@ def adjust_price(symbol, price):
     price = math.floor(price / tick) * tick
     return float(f"{price:.{precision}f}")
 
+def has_position(symbol):
+    positions = client.futures_position_information(symbol=symbol)
+    return positions and float(positions[0]["positionAmt"]) != 0
+
 def has_any_position():
     for symbol in symbols:
-        positions = client.futures_position_information(symbol=symbol)
-        if positions and float(positions[0]["positionAmt"]) != 0:
+        if has_position(symbol):
             return True
     return False
 
@@ -96,7 +93,7 @@ def get_signal(symbol):
 
     return None, None, None
 
-# 🧠 TRAILING STOP
+# 🔥 TRAILING PRO POR FASES
 def manage_trailing():
     for symbol in symbols:
         positions = client.futures_position_information(symbol=symbol)
@@ -113,19 +110,24 @@ def manage_trailing():
         price = float(pos["markPrice"])
 
         side = "LONG" if amt > 0 else "SHORT"
-
         profit = (price - entry) if side == "LONG" else (entry - price)
 
-        # 🔥 ACTIVAR TRAILING SOLO SI YA HAY GANANCIA
         if profit <= 0:
             continue
 
-        # 🔥 NUEVO STOP (break-even + ganancia)
+        # 🧠 FASES
+        if profit < entry * 0.002:
+            factor = 0.0   # break even
+        elif profit < entry * 0.005:
+            factor = 0.3
+        else:
+            factor = 0.6
+
         if side == "LONG":
-            new_sl = entry + profit * 0.5
+            new_sl = entry + profit * factor
             sl_side = "SELL"
         else:
-            new_sl = entry - profit * 0.5
+            new_sl = entry - profit * factor
             sl_side = "BUY"
 
         new_sl = adjust_price(symbol, new_sl)
@@ -138,7 +140,6 @@ def manage_trailing():
                 stopPrice=new_sl,
                 closePosition=True
             )
-            print(f"Trailing actualizado {symbol}")
         except:
             pass
 
@@ -172,18 +173,14 @@ def open_trade():
 
         if side == "LONG":
             client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
-            sl_side = tp_side = "SELL"
-            tp = entry + (entry - stop) * 2
+            sl_side = "SELL"
         else:
             client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
-            sl_side = tp_side = "BUY"
-            tp = entry - (stop - entry) * 2
+            sl_side = "BUY"
 
         stop = adjust_price(symbol, stop)
-        tp = adjust_price(symbol, tp)
 
         client.futures_create_order(symbol=symbol, side=sl_side, type="STOP_MARKET", stopPrice=stop, closePosition=True)
-        client.futures_create_order(symbol=symbol, side=tp_side, type="TAKE_PROFIT_MARKET", stopPrice=tp, closePosition=True)
 
         send_msg(f"🚀 {side} {symbol}")
 
