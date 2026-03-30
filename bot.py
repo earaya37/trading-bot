@@ -1,3 +1,5 @@
+# 🔥 BOT CON TRAILING STOP
+
 from binance.client import Client
 import pandas as pd
 import ta
@@ -37,7 +39,6 @@ def get_balance():
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# 🔍 INFO BINANCE
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
@@ -52,7 +53,7 @@ def adjust_qty(symbol, qty):
     step = symbol_info[symbol]["stepSize"]
     precision = int(round(-math.log(step, 10), 0))
     qty = math.floor(qty / step) * step
-    return float(f"{qty:.{precision}f}")  # 🔥 elimina decimales basura
+    return float(f"{qty:.{precision}f}")
 
 def adjust_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
@@ -95,9 +96,8 @@ def get_signal(symbol):
 
     return None, None, None
 
-def check_closed_trades():
-    global last_positions, wins, losses
-
+# 🧠 TRAILING STOP
+def manage_trailing():
     for symbol in symbols:
         positions = client.futures_position_information(symbol=symbol)
         if not positions:
@@ -105,50 +105,45 @@ def check_closed_trades():
 
         pos = positions[0]
         amt = float(pos["positionAmt"])
-        entry_price = float(pos["entryPrice"])
-        mark_price = float(pos["markPrice"])
 
-        if symbol in last_positions and amt == 0:
-            old = last_positions[symbol]
+        if amt == 0:
+            continue
 
-            entry = old["entry"]
-            side = old["side"]
-            qty = abs(old["qty"])
+        entry = float(pos["entryPrice"])
+        price = float(pos["markPrice"])
 
-            pnl = (mark_price - entry) * qty if side == "LONG" else (entry - mark_price) * qty
+        side = "LONG" if amt > 0 else "SHORT"
 
-            if pnl > 0:
-                wins += 1
-                emoji = "💰"
-            else:
-                losses += 1
-                emoji = "❌"
+        profit = (price - entry) if side == "LONG" else (entry - price)
 
-            total = wins + losses
-            winrate = (wins / total) * 100 if total > 0 else 0
+        # 🔥 ACTIVAR TRAILING SOLO SI YA HAY GANANCIA
+        if profit <= 0:
+            continue
 
-            msg = f"""{emoji} TRADE CERRADO {symbol}
-PnL: {round(pnl,2)} USDT
-Winrate: {round(winrate,2)}%
-Trades: {total}
-"""
-            print(msg)
-            send_msg(msg)
+        # 🔥 NUEVO STOP (break-even + ganancia)
+        if side == "LONG":
+            new_sl = entry + profit * 0.5
+            sl_side = "SELL"
+        else:
+            new_sl = entry - profit * 0.5
+            sl_side = "BUY"
 
-            del last_positions[symbol]
+        new_sl = adjust_price(symbol, new_sl)
 
-        elif amt != 0:
-            side = "LONG" if amt > 0 else "SHORT"
-
-            last_positions[symbol] = {
-                "entry": entry_price,
-                "qty": amt,
-                "side": side
-            }
+        try:
+            client.futures_create_order(
+                symbol=symbol,
+                side=sl_side,
+                type="STOP_MARKET",
+                stopPrice=new_sl,
+                closePosition=True
+            )
+            print(f"Trailing actualizado {symbol}")
+        except:
+            pass
 
 def open_trade():
     if has_any_position():
-        print("Ya hay posición activa")
         return
 
     for symbol in symbols:
@@ -165,16 +160,12 @@ def open_trade():
             continue
 
         qty = (risk / distance) * LEVERAGE
-
-        # 🔒 límite por balance (clave para evitar margin error)
         max_position = balance * 0.2
-        max_qty = max_position / entry
-        qty = min(qty, max_qty)
+        qty = min(qty, max_position / entry)
 
         qty = adjust_qty(symbol, qty)
 
-        notional = qty * entry
-        if notional < 21:
+        if qty * entry < 21:
             continue
 
         client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
@@ -194,27 +185,17 @@ def open_trade():
         client.futures_create_order(symbol=symbol, side=sl_side, type="STOP_MARKET", stopPrice=stop, closePosition=True)
         client.futures_create_order(symbol=symbol, side=tp_side, type="TAKE_PROFIT_MARKET", stopPrice=tp, closePosition=True)
 
-        msg = f"""🚀 TRADE {side}
-Par: {symbol}
-Entry: {entry}
-SL: {stop}
-TP: {tp}
-Qty: {qty}
-"""
-        print(msg)
-        send_msg(msg)
+        send_msg(f"🚀 {side} {symbol}")
 
         return
-
-    print("Sin señal")
 
 while True:
     try:
         print("Bot vivo...")
-        check_closed_trades()
+        manage_trailing()
         open_trade()
         time.sleep(180)
     except Exception as e:
         print("Error:", e)
-        send_msg(f"❌ Error: {e}")
+        send_msg(f"❌ {e}")
         time.sleep(60)
