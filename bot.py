@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["BTCUSDT", "ETHUSDT", "BCHUSDT"]
+symbols = ["ETHUSDT", "BCHUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
