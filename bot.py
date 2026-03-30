@@ -20,6 +20,10 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 RISK_PER_TRADE = 0.01
 LEVERAGE = 5
 
+last_positions = {}
+wins = 0
+losses = 0
+
 def send_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -93,7 +97,59 @@ def get_signal(symbol):
 
     return None, None, None
 
-# 🔥 TRAILING PRO POR FASES
+# 🧠 DETECTAR CIERRES (🔥 REGRESA MÉTRICAS)
+def check_closed_trades():
+    global last_positions, wins, losses
+
+    for symbol in symbols:
+        positions = client.futures_position_information(symbol=symbol)
+        if not positions:
+            continue
+
+        pos = positions[0]
+        amt = float(pos["positionAmt"])
+        entry_price = float(pos["entryPrice"])
+        mark_price = float(pos["markPrice"])
+
+        if symbol in last_positions and amt == 0:
+            old = last_positions[symbol]
+
+            entry = old["entry"]
+            side = old["side"]
+            qty = abs(old["qty"])
+
+            pnl = (mark_price - entry) * qty if side == "LONG" else (entry - mark_price) * qty
+
+            if pnl > 0:
+                wins += 1
+                emoji = "💰"
+            else:
+                losses += 1
+                emoji = "❌"
+
+            total = wins + losses
+            winrate = (wins / total) * 100 if total > 0 else 0
+
+            msg = f"""{emoji} TRADE CERRADO {symbol}
+PnL: {round(pnl,2)} USDT
+Winrate: {round(winrate,2)}%
+Trades: {total}
+"""
+            print(msg)
+            send_msg(msg)
+
+            del last_positions[symbol]
+
+        elif amt != 0:
+            side = "LONG" if amt > 0 else "SHORT"
+
+            last_positions[symbol] = {
+                "entry": entry_price,
+                "qty": amt,
+                "side": side
+            }
+
+# 🔥 TRAILING PRO
 def manage_trailing():
     for symbol in symbols:
         positions = client.futures_position_information(symbol=symbol)
@@ -115,9 +171,8 @@ def manage_trailing():
         if profit <= 0:
             continue
 
-        # 🧠 FASES
         if profit < entry * 0.002:
-            factor = 0.0   # break even
+            factor = 0.0
         elif profit < entry * 0.005:
             factor = 0.3
         else:
@@ -189,6 +244,7 @@ def open_trade():
 while True:
     try:
         print("Bot vivo...")
+        check_closed_trades()
         manage_trailing()
         open_trade()
         time.sleep(180)
