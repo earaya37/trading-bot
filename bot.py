@@ -20,12 +20,10 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 RISK_PER_TRADE = 0.01
 LEVERAGE = 5
 
-# 📊 MÉTRICAS
 last_positions = {}
 wins = 0
 losses = 0
 
-# 📩 TELEGRAM
 def send_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -33,37 +31,35 @@ def send_msg(text):
     except:
         pass
 
-# 💰 BALANCE
 def get_balance():
     balance = client.futures_account_balance()
     for b in balance:
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# 🔍 INFO DE BINANCE (PRECISIÓN)
+# 🔍 INFO BINANCE
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
 for s in exchange_info["symbols"]:
-    symbol = s["symbol"]
     filters = {f["filterType"]: f for f in s["filters"]}
-    
-    symbol_info[symbol] = {
+    symbol_info[s["symbol"]] = {
         "stepSize": float(filters["LOT_SIZE"]["stepSize"]),
-        "minQty": float(filters["LOT_SIZE"]["minQty"]),
         "tickSize": float(filters["PRICE_FILTER"]["tickSize"]),
-        "minNotional": 20
     }
 
 def adjust_qty(symbol, qty):
     step = symbol_info[symbol]["stepSize"]
-    return math.floor(qty / step) * step
+    precision = int(round(-math.log(step, 10), 0))
+    qty = math.floor(qty / step) * step
+    return float(f"{qty:.{precision}f}")  # 🔥 elimina decimales basura
 
 def adjust_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
-    return round(math.floor(price / tick) * tick, 8)
+    precision = int(round(-math.log(tick, 10), 0))
+    price = math.floor(price / tick) * tick
+    return float(f"{price:.{precision}f}")
 
-# 🔒 POSICIÓN GLOBAL
 def has_any_position():
     for symbol in symbols:
         positions = client.futures_position_information(symbol=symbol)
@@ -71,7 +67,6 @@ def has_any_position():
             return True
     return False
 
-# 📈 DATA
 def get_data(symbol):
     klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
     df = pd.DataFrame(klines, columns=[
@@ -83,7 +78,6 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 📊 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -101,7 +95,6 @@ def get_signal(symbol):
 
     return None, None, None
 
-# 🧠 DETECTAR CIERRES
 def check_closed_trades():
     global last_positions, wins, losses
 
@@ -153,10 +146,9 @@ Trades: {total}
                 "side": side
             }
 
-# 🚀 EJECUCIÓN
 def open_trade():
     if has_any_position():
-        print("Ya hay una posición activa global")
+        print("Ya hay posición activa")
         return
 
     for symbol in symbols:
@@ -173,11 +165,16 @@ def open_trade():
             continue
 
         qty = (risk / distance) * LEVERAGE
+
+        # 🔒 límite por balance (clave para evitar margin error)
+        max_position = balance * 0.2
+        max_qty = max_position / entry
+        qty = min(qty, max_qty)
+
         qty = adjust_qty(symbol, qty)
 
         notional = qty * entry
         if notional < 21:
-            print(f"{symbol} ignorado por mínimo notional")
             continue
 
         client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
@@ -211,9 +208,9 @@ Qty: {qty}
 
     print("Sin señal")
 
-# 🔁 LOOP
 while True:
     try:
+        print("Bot vivo...")
         check_closed_trades()
         open_trade()
         time.sleep(180)
