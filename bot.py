@@ -15,6 +15,14 @@ interval = Client.KLINE_INTERVAL_1HOUR
 RISK_PER_TRADE = 0.01
 LEVERAGE = 5
 
+# Obtener balance real
+def get_balance():
+    balance = client.futures_account_balance()
+    for b in balance:
+        if b["asset"] == "USDT":
+            return float(b["balance"])
+
+# Ver si hay posición
 def has_position():
     positions = client.futures_position_information(symbol=symbol)
     for p in positions:
@@ -22,12 +30,7 @@ def has_position():
             return True
     return False
 
-def get_balance():
-    balance = client.futures_account_balance()
-    for b in balance:
-        if b["asset"] == "USDT":
-            return float(b["balance"])
-
+# Obtener datos
 def get_data():
     klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
     df = pd.DataFrame(klines, columns=[
@@ -38,12 +41,24 @@ def get_data():
     df["low"] = df["low"].astype(float)
     return df
 
+# 🔥 CÁLCULO PRO REAL
 def calculate_qty(balance, entry, stop):
-    risk = balance * RISK_PER_TRADE
+    risk_usdt = balance * RISK_PER_TRADE
     distance = abs(entry - stop)
-    qty = risk / distance
+
+    if distance == 0:
+        return None
+
+    # tamaño en BTC basado en riesgo real
+    qty = risk_usdt / distance
+
+    # ajuste por leverage (Binance usa margen, no qty directa)
+    qty = qty * LEVERAGE
+
+    # redondeo seguro
     return round(qty, 3)
 
+# Señal
 def get_signal():
     df = get_data()
 
@@ -64,6 +79,7 @@ def get_signal():
 
     return None, None
 
+# Ejecutar trade
 def open_trade():
     if has_position():
         print("Ya hay posición abierta")
@@ -78,8 +94,15 @@ def open_trade():
     balance = get_balance()
     qty = calculate_qty(balance, entry, stop)
 
+    if qty is None or qty <= 0:
+        print("Cantidad inválida")
+        return
+
+    print(f"Balance: {balance} | Qty: {qty}")
+
     client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
 
+    # BUY
     client.futures_create_order(
         symbol=symbol,
         side="BUY",
@@ -87,6 +110,7 @@ def open_trade():
         quantity=qty
     )
 
+    # STOP LOSS
     client.futures_create_order(
         symbol=symbol,
         side="SELL",
@@ -95,6 +119,7 @@ def open_trade():
         closePosition=True
     )
 
+    # TAKE PROFIT
     tp = entry + (entry - stop) * 2
 
     client.futures_create_order(
@@ -105,8 +130,9 @@ def open_trade():
         closePosition=True
     )
 
-    print(f"Trade abierto | Entry: {entry} SL: {stop} TP: {tp}")
+    print(f"Trade abierto → Entry: {entry} | SL: {stop} | TP: {tp}")
 
+# Loop
 while True:
     try:
         open_trade()
@@ -114,5 +140,3 @@ while True:
     except Exception as e:
         print("Error:", e)
         time.sleep(60)
-
-
