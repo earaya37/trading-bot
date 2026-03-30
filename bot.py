@@ -19,6 +19,11 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 RISK_PER_TRADE = 0.01
 LEVERAGE = 5
 
+# 📊 MÉTRICAS
+last_positions = {}
+wins = 0
+losses = 0
+
 # 📩 TELEGRAM
 def send_msg(text):
     try:
@@ -34,7 +39,7 @@ def get_balance():
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# 🔒 POSICIÓN POR PAR (CORREGIDO)
+# 🔒 POSICIÓN POR PAR
 def has_position(symbol):
     positions = client.futures_position_information(symbol=symbol)
     for p in positions:
@@ -64,12 +69,10 @@ def calculate_qty(balance, entry, stop):
 
     qty = (risk / distance) * LEVERAGE
 
-    # límite máximo
     max_position_usdt = balance * 0.2
     max_qty = max_position_usdt / entry
     qty = min(qty, max_qty)
 
-    # mínimo Binance
     min_notional = 20
     min_qty = min_notional / entry
 
@@ -88,13 +91,11 @@ def get_signal(symbol):
 
     last = df.iloc[-1]
 
-    # LONG
     if last["ema50"] > last["ema200"] and last["rsi"] < 40:
         entry = last["close"]
         stop = df["low"].tail(5).min()
         return "LONG", entry, stop
 
-    # SHORT
     if last["ema50"] < last["ema200"] and last["rsi"] > 60:
         entry = last["close"]
         stop = df["high"].tail(5).max()
@@ -102,11 +103,63 @@ def get_signal(symbol):
 
     return None, None, None
 
+# 🧠 DETECTAR CIERRES
+def check_closed_trades():
+    global last_positions, wins, losses
+
+    for symbol in symbols:
+        positions = client.futures_position_information(symbol=symbol)
+        pos = positions[0]
+
+        amt = float(pos["positionAmt"])
+        entry_price = float(pos["entryPrice"])
+        mark_price = float(pos["markPrice"])
+
+        if symbol in last_positions and amt == 0:
+            old = last_positions[symbol]
+
+            entry = old["entry"]
+            side = old["side"]
+            qty = abs(old["qty"])
+
+            if side == "LONG":
+                pnl = (mark_price - entry) * qty
+            else:
+                pnl = (entry - mark_price) * qty
+
+            if pnl > 0:
+                wins += 1
+                emoji = "💰"
+            else:
+                losses += 1
+                emoji = "❌"
+
+            total = wins + losses
+            winrate = (wins / total) * 100 if total > 0 else 0
+
+            msg = f"""{emoji} TRADE CERRADO {symbol}
+PnL: {round(pnl,2)} USDT
+Winrate: {round(winrate,2)}%
+Trades: {total}
+"""
+            print(msg)
+            send_msg(msg)
+
+            del last_positions[symbol]
+
+        elif amt != 0:
+            side = "LONG" if amt > 0 else "SHORT"
+
+            last_positions[symbol] = {
+                "entry": entry_price,
+                "qty": amt,
+                "side": side
+            }
+
 # 🚀 EJECUCIÓN
 def open_trade():
     for symbol in symbols:
 
-        # 🔒 BLOQUEO POR PAR
         if has_position(symbol):
             print(f"{symbol} ya tiene posición abierta")
             continue
@@ -147,13 +200,14 @@ Qty: {qty}
         print(msg)
         send_msg(msg)
 
-        return  # 🔥 SOLO 1 TRADE GLOBAL
+        return
 
-    send_msg("⏳ Sin señal")
+    print("Sin señal")
 
 # 🔁 LOOP
 while True:
     try:
+        check_closed_trades()
         open_trade()
         time.sleep(180)
     except Exception as e:
