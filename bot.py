@@ -3,9 +3,14 @@ import pandas as pd
 import ta
 import time
 import os
+import requests
 
+# 🔐 KEYS
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
@@ -15,14 +20,22 @@ interval = Client.KLINE_INTERVAL_1HOUR
 RISK_PER_TRADE = 0.01
 LEVERAGE = 5
 
-# Obtener balance real
+# 📩 TELEGRAM
+def send_msg(text):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
+    except:
+        pass
+
+# 💰 BALANCE
 def get_balance():
     balance = client.futures_account_balance()
     for b in balance:
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# Ver si hay posición
+# 📊 POSICIÓN
 def has_position():
     positions = client.futures_position_information(symbol=symbol)
     for p in positions:
@@ -30,7 +43,7 @@ def has_position():
             return True
     return False
 
-# Obtener datos
+# 📈 DATA
 def get_data():
     klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
     df = pd.DataFrame(klines, columns=[
@@ -41,7 +54,7 @@ def get_data():
     df["low"] = df["low"].astype(float)
     return df
 
-# 🔥 CÁLCULO PRO REAL
+# 🔥 CÁLCULO PRO
 def calculate_qty(balance, entry, stop):
     risk_usdt = balance * RISK_PER_TRADE
     distance = abs(entry - stop)
@@ -49,16 +62,11 @@ def calculate_qty(balance, entry, stop):
     if distance == 0:
         return None
 
-    # tamaño en BTC basado en riesgo real
-    qty = risk_usdt / distance
+    qty = (risk_usdt / distance) * LEVERAGE
 
-    # ajuste por leverage (Binance usa margen, no qty directa)
-    qty = qty * LEVERAGE
-
-    # redondeo seguro
     return round(qty, 3)
 
-# Señal
+# 📊 SEÑAL
 def get_signal():
     df = get_data()
 
@@ -79,7 +87,7 @@ def get_signal():
 
     return None, None
 
-# Ejecutar trade
+# 🚀 TRADE
 def open_trade():
     if has_position():
         print("Ya hay posición abierta")
@@ -89,6 +97,7 @@ def open_trade():
 
     if entry is None:
         print("Sin señal")
+        send_msg("⏳ Sin señal")
         return
 
     balance = get_balance()
@@ -102,7 +111,7 @@ def open_trade():
 
     client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
 
-    # BUY
+    # 🟢 COMPRA
     client.futures_create_order(
         symbol=symbol,
         side="BUY",
@@ -110,7 +119,7 @@ def open_trade():
         quantity=qty
     )
 
-    # STOP LOSS
+    # 🔴 STOP LOSS
     client.futures_create_order(
         symbol=symbol,
         side="SELL",
@@ -119,7 +128,7 @@ def open_trade():
         closePosition=True
     )
 
-    # TAKE PROFIT
+    # 🎯 TAKE PROFIT
     tp = entry + (entry - stop) * 2
 
     client.futures_create_order(
@@ -130,13 +139,23 @@ def open_trade():
         closePosition=True
     )
 
-    print(f"Trade abierto → Entry: {entry} | SL: {stop} | TP: {tp}")
+    msg = f"""🟢 TRADE ABIERTO
+Par: {symbol}
+Entry: {entry}
+SL: {stop}
+TP: {round(tp,2)}
+Qty: {qty}
+"""
 
-# Loop
+    print(msg)
+    send_msg(msg)
+
+# 🔁 LOOP
 while True:
     try:
         open_trade()
         time.sleep(300)
     except Exception as e:
         print("Error:", e)
+        send_msg(f"❌ Error: {e}")
         time.sleep(60)
