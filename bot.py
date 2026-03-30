@@ -214,7 +214,6 @@ Qty: {qty}
 # 🔁 LOOP
 while True:
     try:
-        print("Bot vivo - revisando mercado...")
         check_closed_trades()
         open_trade()
         time.sleep(180)
