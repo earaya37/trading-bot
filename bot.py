@@ -4,6 +4,7 @@ import ta
 import time
 import os
 import requests
+import math
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
@@ -13,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["ETHUSDT", "BCHUSDT"]
+symbols = ["BTCUSDT", "ETHUSDT", "BCHUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
@@ -39,15 +40,35 @@ def get_balance():
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# 🔒 POSICIÓN POR PAR
-def has_position(symbol):
-    try:
+# 🔍 INFO DE BINANCE (PRECISIÓN)
+exchange_info = client.futures_exchange_info()
+symbol_info = {}
+
+for s in exchange_info["symbols"]:
+    symbol = s["symbol"]
+    filters = {f["filterType"]: f for f in s["filters"]}
+    
+    symbol_info[symbol] = {
+        "stepSize": float(filters["LOT_SIZE"]["stepSize"]),
+        "minQty": float(filters["LOT_SIZE"]["minQty"]),
+        "tickSize": float(filters["PRICE_FILTER"]["tickSize"]),
+        "minNotional": 20
+    }
+
+def adjust_qty(symbol, qty):
+    step = symbol_info[symbol]["stepSize"]
+    return math.floor(qty / step) * step
+
+def adjust_price(symbol, price):
+    tick = symbol_info[symbol]["tickSize"]
+    return round(math.floor(price / tick) * tick, 8)
+
+# 🔒 POSICIÓN GLOBAL
+def has_any_position():
+    for symbol in symbols:
         positions = client.futures_position_information(symbol=symbol)
-        for p in positions:
-            if float(p["positionAmt"]) != 0:
-                return True
-    except:
-        return False
+        if positions and float(positions[0]["positionAmt"]) != 0:
+            return True
     return False
 
 # 📈 DATA
@@ -62,28 +83,6 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 🔥 CÁLCULO
-def calculate_qty(balance, entry, stop):
-    risk = balance * RISK_PER_TRADE
-    distance = abs(entry - stop)
-
-    if distance == 0:
-        return None
-
-    qty = (risk / distance) * LEVERAGE
-
-    max_position_usdt = balance * 0.2
-    max_qty = max_position_usdt / entry
-    qty = min(qty, max_qty)
-
-    min_notional = 20
-    min_qty = min_notional / entry
-
-    if qty < min_qty:
-        qty = min_qty
-
-    return round(qty, 3)
-
 # 📊 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
@@ -95,14 +94,10 @@ def get_signal(symbol):
     last = df.iloc[-1]
 
     if last["ema50"] > last["ema200"] and last["rsi"] < 40:
-        entry = last["close"]
-        stop = df["low"].tail(5).min()
-        return "LONG", entry, stop
+        return "LONG", last["close"], df["low"].tail(5).min()
 
     if last["ema50"] < last["ema200"] and last["rsi"] > 60:
-        entry = last["close"]
-        stop = df["high"].tail(5).max()
-        return "SHORT", entry, stop
+        return "SHORT", last["close"], df["high"].tail(5).max()
 
     return None, None, None
 
@@ -111,83 +106,74 @@ def check_closed_trades():
     global last_positions, wins, losses
 
     for symbol in symbols:
-        try:
-            positions = client.futures_position_information(symbol=symbol)
+        positions = client.futures_position_information(symbol=symbol)
+        if not positions:
+            continue
 
-            if not positions:
-                continue
+        pos = positions[0]
+        amt = float(pos["positionAmt"])
+        entry_price = float(pos["entryPrice"])
+        mark_price = float(pos["markPrice"])
 
-            pos = positions[0]
+        if symbol in last_positions and amt == 0:
+            old = last_positions[symbol]
 
-            amt = float(pos["positionAmt"])
-            entry_price = float(pos["entryPrice"])
-            mark_price = float(pos["markPrice"])
+            entry = old["entry"]
+            side = old["side"]
+            qty = abs(old["qty"])
 
-            if symbol in last_positions and amt == 0:
-                old = last_positions[symbol]
+            pnl = (mark_price - entry) * qty if side == "LONG" else (entry - mark_price) * qty
 
-                entry = old["entry"]
-                side = old["side"]
-                qty = abs(old["qty"])
+            if pnl > 0:
+                wins += 1
+                emoji = "💰"
+            else:
+                losses += 1
+                emoji = "❌"
 
-                if side == "LONG":
-                    pnl = (mark_price - entry) * qty
-                else:
-                    pnl = (entry - mark_price) * qty
+            total = wins + losses
+            winrate = (wins / total) * 100 if total > 0 else 0
 
-                if pnl > 0:
-                    wins += 1
-                    emoji = "💰"
-                else:
-                    losses += 1
-                    emoji = "❌"
-
-                total = wins + losses
-                winrate = (wins / total) * 100 if total > 0 else 0
-
-                msg = f"""{emoji} TRADE CERRADO {symbol}
+            msg = f"""{emoji} TRADE CERRADO {symbol}
 PnL: {round(pnl,2)} USDT
 Winrate: {round(winrate,2)}%
 Trades: {total}
 """
-                print(msg)
-                send_msg(msg)
+            print(msg)
+            send_msg(msg)
 
-                del last_positions[symbol]
+            del last_positions[symbol]
 
-            elif amt != 0:
-                side = "LONG" if amt > 0 else "SHORT"
+        elif amt != 0:
+            side = "LONG" if amt > 0 else "SHORT"
 
-                last_positions[symbol] = {
-                    "entry": entry_price,
-                    "qty": amt,
-                    "side": side
-                }
-
-        except Exception as e:
-            print(f"Error chequeando {symbol}: {e}")
+            last_positions[symbol] = {
+                "entry": entry_price,
+                "qty": amt,
+                "side": side
+            }
 
 # 🚀 EJECUCIÓN
 def open_trade():
-
-    # 🔒 SOLO 1 TRADE GLOBAL REAL
-    for s in symbols:
-        if has_position(s):
-            print("Ya hay una posición activa, no se abre otra")
-            return
+    if has_any_position():
+        print("Ya hay una posición activa global")
+        return
 
     for symbol in symbols:
-
         side, entry, stop = get_signal(symbol)
 
         if side is None:
             continue
 
         balance = get_balance()
-        qty = calculate_qty(balance, entry, stop)
+        risk = balance * RISK_PER_TRADE
+        distance = abs(entry - stop)
 
-        if qty is None or qty <= 0:
+        if distance == 0:
             continue
+
+        qty = (risk / distance) * LEVERAGE
+        qty = adjust_qty(symbol, qty)
 
         notional = qty * entry
         if notional < 21:
@@ -205,30 +191,33 @@ def open_trade():
             sl_side = tp_side = "BUY"
             tp = entry - (stop - entry) * 2
 
-        client.futures_create_order(
-            symbol=symbol,
-            side=sl_side,
-            type="STOP_MARKET",
-            stopPrice=round(stop, 2),
-            closePosition=True
-        )
+        stop = adjust_price(symbol, stop)
+        tp = adjust_price(symbol, tp)
 
-        client.futures_create_order(
-            symbol=symbol,
-            side=tp_side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=round(tp, 2),
-            closePosition=True
-        )
+        client.futures_create_order(symbol=symbol, side=sl_side, type="STOP_MARKET", stopPrice=stop, closePosition=True)
+        client.futures_create_order(symbol=symbol, side=tp_side, type="TAKE_PROFIT_MARKET", stopPrice=tp, closePosition=True)
 
         msg = f"""🚀 TRADE {side}
 Par: {symbol}
 Entry: {entry}
 SL: {stop}
-TP: {round(tp,2)}
+TP: {tp}
 Qty: {qty}
 """
         print(msg)
         send_msg(msg)
 
         return
+
+    print("Sin señal")
+
+# 🔁 LOOP
+while True:
+    try:
+        check_closed_trades()
+        open_trade()
+        time.sleep(180)
+    except Exception as e:
+        print("Error:", e)
+        send_msg(f"❌ Error: {e}")
+        time.sleep(60)
