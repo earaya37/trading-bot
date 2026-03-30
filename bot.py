@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["ETHUSDT", "BCHUSDT", "BNBUSDT", "BTCUSDT"]
+symbols = ["ETHUSDT", "BCHUSDT", "BTCUSDT", "BNBUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
@@ -78,8 +78,10 @@ def get_data(symbol):
     df["close"] = df["close"].astype(float)
     df["low"] = df["low"].astype(float)
     df["high"] = df["high"].astype(float)
+    df["open"] = df["open"].astype(float)
     return df
 
+# 🧠 SEÑAL CON EXPLICACIÓN
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -89,15 +91,32 @@ def get_signal(symbol):
 
     last = df.iloc[-1]
 
-    if last["ema50"] > last["ema200"] and last["rsi"] < 40:
-        return "LONG", last["close"], df["low"].tail(5).min()
+    # FILTRO EMA
+    if last["ema50"] > last["ema200"]:
+        trend = "LONG"
+    elif last["ema50"] < last["ema200"]:
+        trend = "SHORT"
+    else:
+        print(f"{symbol} → ❌ EMA sin dirección")
+        return None, None, None
 
-    if last["ema50"] < last["ema200"] and last["rsi"] > 60:
+    # FILTRO RSI
+    if trend == "LONG" and not (last["rsi"] < 40):
+        print(f"{symbol} → ❌ RSI no válido para LONG ({round(last['rsi'],2)})")
+        return None, None, None
+
+    if trend == "SHORT" and not (last["rsi"] > 60):
+        print(f"{symbol} → ❌ RSI no válido para SHORT ({round(last['rsi'],2)})")
+        return None, None, None
+
+    print(f"{symbol} → ✅ SEÑAL {trend}")
+
+    if trend == "LONG":
+        return "LONG", last["close"], df["low"].tail(5).min()
+    else:
         return "SHORT", last["close"], df["high"].tail(5).max()
 
-    return None, None, None
-
-# 🧠 DETECTAR CIERRES (🔥 REGRESA MÉTRICAS)
+# 🧠 MÉTRICAS
 def check_closed_trades():
     global last_positions, wins, losses
 
@@ -149,7 +168,7 @@ Trades: {total}
                 "side": side
             }
 
-# 🔥 TRAILING PRO
+# 🔥 TRAILING
 def manage_trailing():
     for symbol in symbols:
         positions = client.futures_position_information(symbol=symbol)
@@ -169,14 +188,9 @@ def manage_trailing():
         profit = (price - entry) if side == "LONG" else (entry - price)
 
         if profit <= 0:
-            continue
+            return
 
-        if profit < entry * 0.002:
-            factor = 0.0
-        elif profit < entry * 0.005:
-            factor = 0.3
-        else:
-            factor = 0.6
+        factor = 0.5
 
         if side == "LONG":
             new_sl = entry + profit * factor
@@ -198,8 +212,10 @@ def manage_trailing():
         except:
             pass
 
+# 🚀 EJECUCIÓN
 def open_trade():
     if has_any_position():
+        print("🔒 Ya hay posición activa")
         return
 
     for symbol in symbols:
@@ -222,6 +238,7 @@ def open_trade():
         qty = adjust_qty(symbol, qty)
 
         if qty * entry < 21:
+            print(f"{symbol} → ❌ menor a mínimo Binance")
             continue
 
         client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
@@ -241,9 +258,12 @@ def open_trade():
 
         return
 
+    print("⏳ Ninguna señal válida")
+
+# 🔁 LOOP
 while True:
     try:
-        print("Bot vivo...")
+        print("\n--- NUEVO CICLO ---")
         check_closed_trades()
         manage_trailing()
         open_trade()
