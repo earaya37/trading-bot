@@ -5,7 +5,6 @@ import time
 import os
 import requests
 
-# 🔐 KEYS
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 
@@ -35,10 +34,13 @@ def get_balance():
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# 📊 POSICIÓN ABIERTA
-def has_position():
-    positions = client.futures_position_information()
-    return any(float(p["positionAmt"]) != 0 for p in positions)
+# 🔒 POSICIÓN POR PAR (CORREGIDO)
+def has_position(symbol):
+    positions = client.futures_position_information(symbol=symbol)
+    for p in positions:
+        if float(p["positionAmt"]) != 0:
+            return True
+    return False
 
 # 📈 DATA
 def get_data(symbol):
@@ -52,7 +54,7 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 🔥 CÁLCULO FINAL CORREGIDO
+# 🔥 CÁLCULO
 def calculate_qty(balance, entry, stop):
     risk = balance * RISK_PER_TRADE
     distance = abs(entry - stop)
@@ -62,12 +64,12 @@ def calculate_qty(balance, entry, stop):
 
     qty = (risk / distance) * LEVERAGE
 
-    # 🔥 límite máximo (20% capital)
+    # límite máximo
     max_position_usdt = balance * 0.2
     max_qty = max_position_usdt / entry
     qty = min(qty, max_qty)
 
-    # 🔥 mínimo Binance ($20)
+    # mínimo Binance
     min_notional = 20
     min_qty = min_notional / entry
 
@@ -76,7 +78,7 @@ def calculate_qty(balance, entry, stop):
 
     return round(qty, 3)
 
-# 📊 SEÑAL (EMA + RSI)
+# 📊 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -86,13 +88,13 @@ def get_signal(symbol):
 
     last = df.iloc[-1]
 
-    # 🟢 LONG
+    # LONG
     if last["ema50"] > last["ema200"] and last["rsi"] < 40:
         entry = last["close"]
         stop = df["low"].tail(5).min()
         return "LONG", entry, stop
 
-    # 🔴 SHORT
+    # SHORT
     if last["ema50"] < last["ema200"] and last["rsi"] > 60:
         entry = last["close"]
         stop = df["high"].tail(5).max()
@@ -102,10 +104,13 @@ def get_signal(symbol):
 
 # 🚀 EJECUCIÓN
 def open_trade():
-    if has_position():
-        return
-
     for symbol in symbols:
+
+        # 🔒 BLOQUEO POR PAR
+        if has_position(symbol):
+            print(f"{symbol} ya tiene posición abierta")
+            continue
+
         side, entry, stop = get_signal(symbol)
 
         if side is None:
@@ -117,49 +122,20 @@ def open_trade():
         if qty is None or qty <= 0:
             continue
 
-        print(f"Trade en {symbol} | Qty: {qty}")
-
         client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
 
         if side == "LONG":
-            client.futures_create_order(
-                symbol=symbol,
-                side="BUY",
-                type="MARKET",
-                quantity=qty
-            )
-            sl_side = "SELL"
-            tp_side = "SELL"
+            client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
+            sl_side = tp_side = "SELL"
             tp = entry + (entry - stop) * 2
 
         else:
-            client.futures_create_order(
-                symbol=symbol,
-                side="SELL",
-                type="MARKET",
-                quantity=qty
-            )
-            sl_side = "BUY"
-            tp_side = "BUY"
+            client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
+            sl_side = tp_side = "BUY"
             tp = entry - (stop - entry) * 2
 
-        # STOP LOSS
-        client.futures_create_order(
-            symbol=symbol,
-            side=sl_side,
-            type="STOP_MARKET",
-            stopPrice=round(stop, 2),
-            closePosition=True
-        )
-
-        # TAKE PROFIT
-        client.futures_create_order(
-            symbol=symbol,
-            side=tp_side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=round(tp, 2),
-            closePosition=True
-        )
+        client.futures_create_order(symbol=symbol, side=sl_side, type="STOP_MARKET", stopPrice=round(stop, 2), closePosition=True)
+        client.futures_create_order(symbol=symbol, side=tp_side, type="TAKE_PROFIT_MARKET", stopPrice=round(tp, 2), closePosition=True)
 
         msg = f"""🚀 TRADE {side}
 Par: {symbol}
@@ -168,11 +144,10 @@ SL: {stop}
 TP: {round(tp,2)}
 Qty: {qty}
 """
-
         print(msg)
         send_msg(msg)
 
-        return
+        return  # 🔥 SOLO 1 TRADE GLOBAL
 
     send_msg("⏳ Sin señal")
 
