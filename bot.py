@@ -31,10 +31,13 @@ def send_msg(text):
 
 # 💰 BALANCE
 def get_balance():
-    balance = client.futures_account_balance()
-    for b in balance:
-        if b["asset"] == "USDT":
-            return float(b["balance"])
+    try:
+        balance = client.futures_account_balance()
+        for b in balance:
+            if b["asset"] == "USDT":
+                return float(b["balance"])
+    except:
+        return 0
 
 # 🔍 PRECISIÓN
 exchange_info = client.futures_exchange_info()
@@ -55,7 +58,7 @@ def adjust_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
     return round(math.floor(price / tick) * tick, 6)
 
-# 🔒 POSICIONES
+# 🔒 POSICIONES SEGURAS
 def get_position_amt(symbol):
     try:
         pos = client.futures_position_information(symbol=symbol)
@@ -74,29 +77,39 @@ def get_position_amt(symbol):
         return 0.0
 
 def has_position(symbol):
-    return get_position_amt(symbol) != 0
+    return abs(get_position_amt(symbol)) > 0
 
 def has_any_position():
-    for s in symbols:
-        if has_position(s):
-            return True
-    return False
+    try:
+        for s in symbols:
+            if has_position(s):
+                return True
+        return False
+    except:
+        return False
 
 # 📈 DATA
 def get_data(symbol):
-    klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
-    df = pd.DataFrame(klines, columns=[
-        "time","open","high","low","close","volume",
-        "close_time","qav","trades","tbbav","tbqav","ignore"
-    ])
-    df["close"] = df["close"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["high"] = df["high"].astype(float)
-    return df
+    try:
+        klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
+        df = pd.DataFrame(klines, columns=[
+            "time","open","high","low","close","volume",
+            "close_time","qav","trades","tbbav","tbqav","ignore"
+        ])
+        df["close"] = df["close"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["high"] = df["high"].astype(float)
+        return df
+    except Exception as e:
+        print(f"Error data {symbol}:", e)
+        return None
 
 # 🧠 SEÑAL MEJORADA
 def get_signal(symbol):
     df = get_data(symbol)
+
+    if df is None or len(df) < 50:
+        return None, None, None, None
 
     df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
     df["ema200"] = ta.trend.ema_indicator(df["close"], window=200)
@@ -111,7 +124,7 @@ def get_signal(symbol):
 
     print(f"{symbol} → RSI {round(rsi,1)}")
 
-    # LONG (pullback real)
+    # LONG
     if ema50 > ema200 and 35 < rsi < 50:
         stop = df["low"].tail(5).min()
         return "LONG", price, stop, rsi
@@ -123,7 +136,7 @@ def get_signal(symbol):
 
     return None, None, None, None
 
-# 🚀 ORDEN SEGURA (ANTI -1007)
+# 🚀 ORDEN SEGURA (ANTI TIMEOUT)
 def safe_order(symbol, side, qty):
     client_id = str(uuid.uuid4())
 
@@ -139,19 +152,19 @@ def safe_order(symbol, side, qty):
 
     except Exception as e:
         if "-1007" in str(e):
-            print("⚠️ Timeout, verificando...")
+            print("⚠️ Timeout - verificando orden...")
 
             time.sleep(2)
 
             if has_position(symbol):
-                print("✅ Orden sí ejecutada")
+                print("✅ Orden ejecutada")
                 return True
 
-            print("❌ No ejecutada")
+            print("❌ Orden NO ejecutada")
             return False
 
-        else:
-            raise e
+        print("Error orden:", e)
+        return False
 
 # 🚀 TRADE
 def open_trade():
@@ -161,6 +174,10 @@ def open_trade():
 
     balance = get_balance()
 
+    if balance <= 0:
+        print("⚠️ Sin balance")
+        return
+
     for symbol in symbols:
 
         side, entry, stop, rsi = get_signal(symbol)
@@ -168,14 +185,16 @@ def open_trade():
         if side is None:
             continue
 
-        risk_usdt = balance * 0.05  # 5% capital
-        qty = risk_usdt / entry
-        qty = adjust_qty(symbol, qty)
+        risk_usdt = balance * 0.05
+        qty = adjust_qty(symbol, risk_usdt / entry)
 
         if qty <= 0:
             continue
 
-        client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+        try:
+            client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+        except:
+            pass
 
         if side == "LONG":
             ok = safe_order(symbol, "BUY", qty)
@@ -195,23 +214,27 @@ def open_trade():
         stop = adjust_price(symbol, stop)
         tp = adjust_price(symbol, tp)
 
-        # STOP LOSS
-        client.futures_create_order(
-            symbol=symbol,
-            side=sl_side,
-            type="STOP_MARKET",
-            stopPrice=stop,
-            closePosition=True
-        )
+        try:
+            # STOP LOSS
+            client.futures_create_order(
+                symbol=symbol,
+                side=sl_side,
+                type="STOP_MARKET",
+                stopPrice=stop,
+                closePosition=True
+            )
 
-        # TAKE PROFIT
-        client.futures_create_order(
-            symbol=symbol,
-            side=sl_side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=tp,
-            closePosition=True
-        )
+            # TAKE PROFIT
+            client.futures_create_order(
+                symbol=symbol,
+                side=sl_side,
+                type="TAKE_PROFIT_MARKET",
+                stopPrice=tp,
+                closePosition=True
+            )
+
+        except Exception as e:
+            print("Error SL/TP:", e)
 
         msg = f"""🚀 TRADE {side}
 Par: {symbol}
@@ -245,6 +268,6 @@ while True:
         time.sleep(180)
 
     except Exception as e:
-        print("Error:", e)
+        print("Error loop:", e)
         send_msg(f"❌ {e}")
         time.sleep(60)
