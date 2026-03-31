@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["BTCUSDT","ETHUSDT","BCHUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","BNBUSDT","ADAUSDT"]
+symbols = ["BTCUSDT","ETHUSDT","BCHUSDT","SOLUSDT","XRPUSDT","ADAUSDT","BNBUSDT","DOGEUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
@@ -83,7 +83,7 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 🧠 NUEVA ESTRATEGIA
+# 🧠 ESTRATEGIA (ACTIVA DE VERDAD)
 def analyze_symbol(symbol):
     df = get_data(symbol)
 
@@ -98,11 +98,13 @@ def analyze_symbol(symbol):
     price = last["close"]
     rsi = last["rsi"]
 
-    distance_to_ema = abs(price - ema50) / price
+    distance = abs(price - ema50) / price
 
-    # LONG
-    if ema50 > ema200 and 40 < rsi < 55 and distance_to_ema < 0.003:
-        score = (55 - rsi) + (0.003 - distance_to_ema)*1000
+    print(f"{symbol} → RSI {round(rsi,1)} | dist {round(distance,4)}")
+
+    # 🔥 LONG
+    if ema50 > ema200 and 30 < rsi < 65 and distance < 0.015:
+        score = (65 - rsi) + (0.015 - distance)*100
         return {
             "symbol": symbol,
             "side": "LONG",
@@ -111,9 +113,9 @@ def analyze_symbol(symbol):
             "score": score
         }
 
-    # SHORT
-    if ema50 < ema200 and 45 < rsi < 60 and distance_to_ema < 0.003:
-        score = (rsi - 45) + (0.003 - distance_to_ema)*1000
+    # 🔥 SHORT
+    if ema50 < ema200 and 35 < rsi < 70 and distance < 0.015:
+        score = (rsi - 35) + (0.015 - distance)*100
         return {
             "symbol": symbol,
             "side": "SHORT",
@@ -122,7 +124,6 @@ def analyze_symbol(symbol):
             "score": score
         }
 
-    print(f"{symbol} → sin señal | RSI {round(rsi,1)}")
     return None
 
 # 🏆 MEJOR TRADE
@@ -139,7 +140,8 @@ def get_best_trade():
         return None
 
     best = max(candidates, key=lambda x: x["score"])
-    print(f"🏆 MEJOR: {best['symbol']}")
+
+    print(f"🏆 MEJOR: {best['symbol']} | score {round(best['score'],2)}")
 
     return best
 
@@ -175,7 +177,9 @@ def check_closed_trades():
             total = wins + losses
             winrate = (wins/total)*100 if total else 0
 
-            send_msg(f"{emoji} {symbol} {round(pnl,2)} USDT | WR {round(winrate,1)}%")
+            msg = f"{emoji} {symbol} {round(pnl,2)} USDT | WR {round(winrate,1)}%"
+            print(msg)
+            send_msg(msg)
 
             del last_positions[symbol]
 
@@ -212,7 +216,8 @@ def open_trade():
     qty = min(qty, (balance*0.2)/entry)
     qty = adjust_qty(symbol, qty)
 
-    if qty*entry < 21:
+    if qty * entry < 21:
+        print(f"{symbol} → ❌ menor a mínimo")
         return
 
     client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
@@ -228,7 +233,9 @@ def open_trade():
 
     client.futures_create_order(symbol=symbol, side=sl_side, type="STOP_MARKET", stopPrice=stop, closePosition=True)
 
-    send_msg(f"🚀 {side} {symbol}")
+    msg = f"🚀 {side} {symbol}"
+    print(msg)
+    send_msg(msg)
 
 # 🔁 LOOP
 while True:
@@ -237,7 +244,7 @@ while True:
         print(f"\n--- CICLO {cycle_count} ---")
 
         if cycle_count % 10 == 0:
-            send_msg("🤖 Bot activo")
+            send_msg("🤖 Bot activo y funcionando")
 
         check_closed_trades()
         open_trade()
