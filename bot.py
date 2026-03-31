@@ -23,7 +23,7 @@ cycle_count = 0
 
 # 🔥 CONFIGURACIÓN NUEVA
 RISK_PERCENT = 0.12       # 12% por trade
-MIN_NOTIONAL = 12         # mínimo real
+MIN_NOTIONAL = 15         # mínimo real
 MAX_TRADES = 1            # evitar sobretrading
 
 # 📩 TELEGRAM
