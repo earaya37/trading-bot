@@ -21,10 +21,13 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
 cycle_count = 0
 
-# 🔥 CONFIGURACIÓN NUEVA
-RISK_PERCENT = 0.12       # 12% por trade
-MIN_NOTIONAL = 15         # mínimo real
-MAX_TRADES = 1            # evitar sobretrading
+# 🔥 CONFIG
+RISK_PERCENT = 0.12
+MIN_NOTIONAL = 15
+MAX_TRADES = 1
+
+# 🔥 TRACKING POSICIONES
+last_positions = {}
 
 # 📩 TELEGRAM
 def send_msg(text):
@@ -114,7 +117,7 @@ def get_data(symbol):
     except:
         return None
 
-# 🧠 SEÑAL MEJORADA (CON CONFIRMACIÓN)
+# 🧠 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -136,14 +139,14 @@ def get_signal(symbol):
 
     print(f"{symbol} → RSI {round(rsi,1)}")
 
-    # LONG con confirmación
+    # LONG
     if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
         if abs(price - stop)/price < 0.004:
             return None, None, None, None
         return "LONG", price, stop, rsi
 
-    # SHORT con confirmación
+    # SHORT
     if ema50 < ema200 and 50 < rsi < 65 and rsi < prev_rsi:
         stop = df["high"].tail(5).max()
         if abs(price - stop)/price < 0.004:
@@ -172,6 +175,21 @@ def safe_order(symbol, side, qty):
         print("Order error:", e)
         return False
 
+# 🔔 DETECTAR CIERRES
+def check_closed_positions():
+    global last_positions
+
+    for symbol in symbols:
+        current_amt = get_position_amt(symbol)
+
+        if symbol in last_positions:
+            prev_amt = last_positions[symbol]
+
+            if prev_amt != 0 and current_amt == 0:
+                send_msg(f"✅ Trade cerrado en {symbol}")
+
+        last_positions[symbol] = current_amt
+
 # 🚀 TRADE
 def open_trade():
     if has_any_position():
@@ -189,7 +207,6 @@ def open_trade():
         if side is None:
             continue
 
-        # 🔥 NUEVO RIESGO
         risk_usdt = balance * RISK_PERCENT
 
         if risk_usdt < MIN_NOTIONAL:
@@ -264,6 +281,8 @@ while True:
     try:
         cycle_count += 1
         print(f"\n--- CICLO {cycle_count} ---")
+
+        check_closed_positions()
 
         if cycle_count % 10 == 0:
             send_msg("🤖 Bot activo")
