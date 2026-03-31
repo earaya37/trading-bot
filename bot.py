@@ -39,54 +39,59 @@ def get_balance():
     except:
         return 0
 
-# 🔍 PRECISIÓN
+# 🔍 PRECISION INFO
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
+def get_decimals(step):
+    step_str = "{:f}".format(step)
+    return len(step_str.rstrip('0').split('.')[1]) if '.' in step_str else 0
+
 for s in exchange_info["symbols"]:
     filters = {f["filterType"]: f for f in s["filters"]}
+    step = float(filters["LOT_SIZE"]["stepSize"])
+    tick = float(filters["PRICE_FILTER"]["tickSize"])
+
     symbol_info[s["symbol"]] = {
-        "stepSize": float(filters["LOT_SIZE"]["stepSize"]),
-        "tickSize": float(filters["PRICE_FILTER"]["tickSize"]),
+        "stepSize": step,
+        "tickSize": tick,
+        "qtyDecimals": get_decimals(step),
+        "priceDecimals": get_decimals(tick)
     }
 
 def adjust_qty(symbol, qty):
     step = symbol_info[symbol]["stepSize"]
-    return math.floor(qty / step) * step
+    decimals = symbol_info[symbol]["qtyDecimals"]
+    qty = math.floor(qty / step) * step
+    return round(qty, decimals)
 
 def adjust_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
-    return round(math.floor(price / tick) * tick, 6)
+    decimals = symbol_info[symbol]["priceDecimals"]
+    price = math.floor(price / tick) * tick
+    return round(price, decimals)
 
-# 🔒 POSICIONES SEGURAS
+# 🔒 POSICIONES
 def get_position_amt(symbol):
     try:
         pos = client.futures_position_information(symbol=symbol)
-
         if not pos:
             return 0.0
-
         for p in pos:
             if p["symbol"] == symbol:
                 return float(p["positionAmt"])
-
         return 0.0
-
-    except Exception as e:
-        print("Error getting position:", e)
+    except:
         return 0.0
 
 def has_position(symbol):
     return abs(get_position_amt(symbol)) > 0
 
 def has_any_position():
-    try:
-        for s in symbols:
-            if has_position(s):
-                return True
-        return False
-    except:
-        return False
+    for s in symbols:
+        if has_position(s):
+            return True
+    return False
 
 # 📈 DATA
 def get_data(symbol):
@@ -100,11 +105,10 @@ def get_data(symbol):
         df["low"] = df["low"].astype(float)
         df["high"] = df["high"].astype(float)
         return df
-    except Exception as e:
-        print(f"Error data {symbol}:", e)
+    except:
         return None
 
-# 🧠 SEÑAL MEJORADA
+# 🧠 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -124,19 +128,17 @@ def get_signal(symbol):
 
     print(f"{symbol} → RSI {round(rsi,1)}")
 
-    # LONG
     if ema50 > ema200 and 35 < rsi < 50:
         stop = df["low"].tail(5).min()
         return "LONG", price, stop, rsi
 
-    # SHORT
     if ema50 < ema200 and 50 < rsi < 65:
         stop = df["high"].tail(5).max()
         return "SHORT", price, stop, rsi
 
     return None, None, None, None
 
-# 🚀 ORDEN SEGURA (ANTI TIMEOUT)
+# 🚀 ORDEN SEGURA
 def safe_order(symbol, side, qty):
     client_id = str(uuid.uuid4())
 
@@ -149,21 +151,13 @@ def safe_order(symbol, side, qty):
             newClientOrderId=client_id
         )
         return True
-
     except Exception as e:
         if "-1007" in str(e):
-            print("⚠️ Timeout - verificando orden...")
-
             time.sleep(2)
-
             if has_position(symbol):
-                print("✅ Orden ejecutada")
                 return True
-
-            print("❌ Orden NO ejecutada")
             return False
-
-        print("Error orden:", e)
+        print(e)
         return False
 
 # 🚀 TRADE
@@ -173,9 +167,7 @@ def open_trade():
         return
 
     balance = get_balance()
-
     if balance <= 0:
-        print("⚠️ Sin balance")
         return
 
     for symbol in symbols:
@@ -201,7 +193,6 @@ def open_trade():
             sl_side = "SELL"
             risk = entry - stop
             tp = entry + (risk * 2)
-
         else:
             ok = safe_order(symbol, "SELL", qty)
             sl_side = "BUY"
@@ -215,7 +206,6 @@ def open_trade():
         tp = adjust_price(symbol, tp)
 
         try:
-            # STOP LOSS
             client.futures_create_order(
                 symbol=symbol,
                 side=sl_side,
@@ -224,7 +214,6 @@ def open_trade():
                 closePosition=True
             )
 
-            # TAKE PROFIT
             client.futures_create_order(
                 symbol=symbol,
                 side=sl_side,
@@ -232,9 +221,8 @@ def open_trade():
                 stopPrice=tp,
                 closePosition=True
             )
-
         except Exception as e:
-            print("Error SL/TP:", e)
+            print("SL/TP error:", e)
 
         msg = f"""🚀 TRADE {side}
 Par: {symbol}
@@ -246,7 +234,6 @@ Par: {symbol}
 
 📊 RSI: {round(rsi,2)}
 """
-
         print(msg)
         send_msg(msg)
 
