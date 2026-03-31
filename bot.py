@@ -21,6 +21,8 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
 cycle_count = 0
 
+MIN_NOTIONAL = 5  # 🔥 clave
+
 # 📩 TELEGRAM
 def send_msg(text):
     try:
@@ -140,15 +142,13 @@ def get_signal(symbol):
 
 # 🚀 ORDEN SEGURA
 def safe_order(symbol, side, qty):
-    client_id = str(uuid.uuid4())
-
     try:
         client.futures_create_order(
             symbol=symbol,
             side=side,
             type="MARKET",
             quantity=qty,
-            newClientOrderId=client_id
+            newClientOrderId=str(uuid.uuid4())
         )
         return True
     except Exception as e:
@@ -177,7 +177,13 @@ def open_trade():
         if side is None:
             continue
 
+        # 🔥 tamaño base
         risk_usdt = balance * 0.05
+
+        # 🔥 FORZAR mínimo Binance
+        if risk_usdt < MIN_NOTIONAL:
+            risk_usdt = MIN_NOTIONAL + 1
+
         qty = format_qty(symbol, risk_usdt / entry)
 
         if float(qty) <= 0:
@@ -231,6 +237,7 @@ Par: {symbol}
 🛑 SL: {stop}
 🎯 TP: {tp}
 📦 Qty: {qty}
+💵 Notional: ~{round(float(qty)*entry,2)} USDT
 
 📊 RSI: {round(rsi,2)}
 """
