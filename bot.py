@@ -6,6 +6,7 @@ import os
 import requests
 import math
 import uuid
+from datetime import datetime
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
@@ -19,14 +20,19 @@ symbols = ["XRPUSDT","ADAUSDT","DOGEUSDT","SOLUSDT","MATICUSDT","TRXUSDT","LTCUS
 
 interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
-cycle_count = 0
 
 RISK_PERCENT = 0.10
 MIN_NOTIONAL = 15
 MAX_TRADES = 3
 
+# 🔥 TRACKING
 last_positions = {}
 trade_data = {}
+
+daily_profit = 0
+wins = 0
+losses = 0
+last_day = datetime.now().day
 
 # 📩 TELEGRAM
 def send_msg(text):
@@ -92,11 +98,7 @@ def get_position_amt(symbol):
         return 0.0
 
 def get_open_positions_count():
-    count = 0
-    for s in symbols:
-        if abs(get_position_amt(s)) > 0:
-            count += 1
-    return count
+    return sum(1 for s in symbols if abs(get_position_amt(s)) > 0)
 
 # 📈 DATA
 def get_data(symbol):
@@ -161,37 +163,13 @@ def safe_order(symbol, side, qty):
     except:
         return False
 
-# 🔔 GESTIÓN
+# 🔔 GESTIÓN + TRACKING
 def manage_positions():
-    global last_positions, trade_data
+    global last_positions, trade_data, daily_profit, wins, losses
 
     for symbol in symbols:
         amt = get_position_amt(symbol)
 
-        if symbol in trade_data and amt != 0:
-            entry = trade_data[symbol]["entry"]
-            side = trade_data[symbol]["side"]
-
-            price = float(get_data(symbol)["close"].iloc[-1])
-
-            # BREAK EVEN
-            if not trade_data[symbol].get("be"):
-                if (side == "LONG" and price > entry * 1.01) or \
-                   (side == "SHORT" and price < entry * 0.99):
-
-                    trade_data[symbol]["be"] = True
-
-                    client.futures_create_order(
-                        symbol=symbol,
-                        side="SELL" if side=="LONG" else "BUY",
-                        type="STOP_MARKET",
-                        stopPrice=format_price(symbol, entry),
-                        closePosition=True
-                    )
-
-                    send_msg(f"🔒 Break-even activado en {symbol}")
-
-        # DETECTAR CIERRE
         if symbol in last_positions:
             if last_positions[symbol] != 0 and amt == 0:
 
@@ -207,6 +185,13 @@ def manage_positions():
 
                     profit_usdt = round(profit * data["qty"], 2)
 
+                    daily_profit += profit_usdt
+
+                    if profit_usdt > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+
                     send_msg(f"""📊 TRADE CERRADO {symbol}
 
 💰 Resultado: {profit_usdt} USDT
@@ -215,6 +200,21 @@ def manage_positions():
                     del trade_data[symbol]
 
         last_positions[symbol] = amt
+
+# 📊 REPORTE DIARIO
+def daily_report():
+    global daily_profit, wins, losses
+
+    result = "📈 GANANCIA" if daily_profit > 0 else "📉 PÉRDIDA"
+
+    send_msg(f"""📊 REPORTE DEL DÍA
+
+{result}
+
+💰 Total: {round(daily_profit,2)} USDT
+✅ Ganadas: {wins}
+❌ Perdidas: {losses}
+""")
 
 # 🚀 TRADE
 def open_trade():
@@ -281,7 +281,6 @@ def open_trade():
             "side": side
         }
 
-        # 🔥 MENSAJE COMPLETO RESTAURADO
         send_msg(f"""🚀 TRADE {side}
 Par: {symbol}
 
@@ -298,11 +297,18 @@ Par: {symbol}
 # 🔁 LOOP
 while True:
     try:
-        cycle_count += 1
-        print(f"Ciclo {cycle_count}")
+        now = datetime.now()
 
         manage_positions()
         open_trade()
+
+        # 🔥 REPORTE A LAS 23:59
+        if now.hour == 23 and now.minute >= 59:
+            daily_report()
+            daily_profit = 0
+            wins = 0
+            losses = 0
+            time.sleep(60)
 
         time.sleep(120)
 
