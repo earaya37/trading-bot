@@ -21,14 +21,13 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
 cycle_count = 0
 
-RISK_PERCENT = 0.12
+# 🔥 CONFIG HEDGE
+RISK_PERCENT = 0.10
 MIN_NOTIONAL = 15
-MAX_TRADES = 1
+MAX_TRADES = 3
 
-# 🔥 TRACKING
 last_positions = {}
 trade_data = {}
-start_balance = None
 
 # 📩 TELEGRAM
 def send_msg(text):
@@ -93,15 +92,12 @@ def get_position_amt(symbol):
     except:
         return 0.0
 
-def has_position(symbol):
-    return abs(get_position_amt(symbol)) > 0
-
-def has_any_position():
+def get_open_positions_count():
     count = 0
     for s in symbols:
-        if has_position(s):
+        if abs(get_position_amt(s)) > 0:
             count += 1
-    return count >= MAX_TRADES
+    return count
 
 # 📈 DATA
 def get_data(symbol):
@@ -138,8 +134,6 @@ def get_signal(symbol):
     prev_rsi = prev["rsi"]
     price = last["close"]
 
-    print(f"{symbol} → RSI {round(rsi,1)}")
-
     if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
         if abs(price - stop)/price < 0.004:
@@ -154,7 +148,7 @@ def get_signal(symbol):
 
     return None, None, None, None
 
-# 🚀 ORDEN SEGURA
+# 🚀 ORDEN
 def safe_order(symbol, side, qty):
     try:
         client.futures_create_order(
@@ -165,95 +159,88 @@ def safe_order(symbol, side, qty):
             newClientOrderId=str(uuid.uuid4())
         )
         return True
-    except Exception as e:
-        if "-1007" in str(e):
-            time.sleep(2)
-            if has_position(symbol):
-                return True
-            return False
-        print("Order error:", e)
+    except:
         return False
 
-# 🔔 TRACKING PRO
-def check_closed_positions():
+# 🔔 TRACKING + TRAILING + BREAKEVEN
+def manage_positions():
     global last_positions, trade_data
 
     for symbol in symbols:
-        current_amt = get_position_amt(symbol)
+        amt = get_position_amt(symbol)
 
+        if symbol in trade_data and amt != 0:
+            entry = trade_data[symbol]["entry"]
+            side = trade_data[symbol]["side"]
+
+            price = float(get_data(symbol)["close"].iloc[-1])
+
+            # 🔥 break even
+            if not trade_data[symbol].get("be"):
+
+                if (side == "LONG" and price > entry * 1.01) or \
+                   (side == "SHORT" and price < entry * 0.99):
+
+                    trade_data[symbol]["be"] = True
+
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side="SELL" if side=="LONG" else "BUY",
+                        type="STOP_MARKET",
+                        stopPrice=format_price(symbol, entry),
+                        closePosition=True
+                    )
+
+                    send_msg(f"🔒 Break-even activado en {symbol}")
+
+        # 🔥 detectar cierre
         if symbol in last_positions:
-            prev_amt = last_positions[symbol]
-
-            if prev_amt != 0 and current_amt == 0:
+            if last_positions[symbol] != 0 and amt == 0:
 
                 if symbol in trade_data:
-                    entry = trade_data[symbol]["entry"]
-                    tp = trade_data[symbol]["tp"]
-                    sl = trade_data[symbol]["sl"]
-                    side = trade_data[symbol]["side"]
+                    data = trade_data[symbol]
 
                     price = float(get_data(symbol)["close"].iloc[-1])
 
-                    if side == "LONG":
-                        profit = price - entry
+                    if data["side"] == "LONG":
+                        profit = price - data["entry"]
                     else:
-                        profit = entry - price
+                        profit = data["entry"] - price
 
-                    profit_usdt = round(profit * trade_data[symbol]["qty"], 2)
-                    profit_pct = round((profit / entry) * 100, 2)
+                    profit_usdt = round(profit * data["qty"], 2)
 
-                    result = "🎯 TP" if (
-                        (side == "LONG" and price >= tp) or
-                        (side == "SHORT" and price <= tp)
-                    ) else "🛑 SL"
-
-                    msg = f"""📊 TRADE CERRADO {symbol}
-
-{result}
-
-💰 Resultado: {profit_usdt} USDT
-📈 %: {profit_pct}%
-
-"""
-                    send_msg(msg)
+                    send_msg(f"📊 Trade cerrado {symbol} → {profit_usdt} USDT")
 
                     del trade_data[symbol]
 
-        last_positions[symbol] = current_amt
+        last_positions[symbol] = amt
 
 # 🚀 TRADE
 def open_trade():
-    global trade_data
-
-    if has_any_position():
-        print("🔒 trade activo")
+    if get_open_positions_count() >= MAX_TRADES:
         return
 
     balance = get_balance()
-    if balance <= 0:
-        return
 
     for symbol in symbols:
+
+        if get_open_positions_count() >= MAX_TRADES:
+            return
+
+        if abs(get_position_amt(symbol)) > 0:
+            continue
 
         side, entry, stop, rsi = get_signal(symbol)
 
         if side is None:
             continue
 
-        risk_usdt = balance * RISK_PERCENT
-
-        if risk_usdt < MIN_NOTIONAL:
-            risk_usdt = MIN_NOTIONAL
+        risk_usdt = max(balance * RISK_PERCENT, MIN_NOTIONAL)
 
         qty = format_qty(symbol, risk_usdt / entry)
 
         if float(qty) <= 0:
             continue
-
-        try:
-            client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
-        except:
-            pass
 
         if side == "LONG":
             ok = safe_order(symbol, "BUY", qty)
@@ -269,70 +256,45 @@ def open_trade():
         if not ok:
             continue
 
-        stop_f = float(format_price(symbol, stop))
-        tp_f = float(format_price(symbol, tp))
+        stop = format_price(symbol, stop)
+        tp = format_price(symbol, tp)
 
-        try:
-            client.futures_create_order(
-                symbol=symbol,
-                side=sl_side,
-                type="STOP_MARKET",
-                stopPrice=str(stop_f),
-                closePosition=True
-            )
+        client.futures_create_order(
+            symbol=symbol,
+            side=sl_side,
+            type="STOP_MARKET",
+            stopPrice=stop,
+            closePosition=True
+        )
 
-            client.futures_create_order(
-                symbol=symbol,
-                side=sl_side,
-                type="TAKE_PROFIT_MARKET",
-                stopPrice=str(tp_f),
-                closePosition=True
-            )
-        except Exception as e:
-            print("SL/TP error:", e)
+        client.futures_create_order(
+            symbol=symbol,
+            side=sl_side,
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=tp,
+            closePosition=True
+        )
 
-        # 🔥 guardar trade
         trade_data[symbol] = {
             "entry": entry,
-            "sl": stop_f,
-            "tp": tp_f,
             "qty": float(qty),
             "side": side
         }
 
-        msg = f"""🚀 TRADE {side}
-Par: {symbol}
-
-💰 Entry: {round(entry,4)}
-🛑 SL: {stop_f}
-🎯 TP: {tp_f}
-📦 Qty: {qty}
-
-📊 RSI: {round(rsi,2)}
-"""
-        print(msg)
-        send_msg(msg)
-
-        return
-
-    print("⏳ Sin señal")
+        send_msg(f"🚀 {side} {symbol} | Qty: {qty}")
 
 # 🔁 LOOP
 while True:
     try:
         cycle_count += 1
-        print(f"\n--- CICLO {cycle_count} ---")
+        print(f"Ciclo {cycle_count}")
 
-        check_closed_positions()
-
-        if cycle_count % 10 == 0:
-            send_msg("🤖 Bot activo")
-
+        manage_positions()
         open_trade()
 
-        time.sleep(180)
+        time.sleep(120)
 
     except Exception as e:
-        print("Error loop:", e)
+        print(e)
         send_msg(f"❌ {e}")
         time.sleep(60)
