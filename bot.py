@@ -57,8 +57,21 @@ def adjust_price(symbol, price):
 
 # 🔒 POSICIONES
 def get_position_amt(symbol):
-    pos = client.futures_position_information(symbol=symbol)
-    return float(pos[0]["positionAmt"])
+    try:
+        pos = client.futures_position_information(symbol=symbol)
+
+        if not pos:
+            return 0.0
+
+        for p in pos:
+            if p["symbol"] == symbol:
+                return float(p["positionAmt"])
+
+        return 0.0
+
+    except Exception as e:
+        print("Error getting position:", e)
+        return 0.0
 
 def has_position(symbol):
     return get_position_amt(symbol) != 0
