@@ -1,5 +1,3 @@
-# 🔥 BOT AJUSTADO (MÁS SEÑALES + DEBUG REAL)
-
 from binance.client import Client
 import pandas as pd
 import ta
@@ -16,14 +14,18 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["BTCUSDT", "ETHUSDT", "BCHUSDT", "SOLUSDT", "XRPUSDT"]
+symbols = ["BTCUSDT","ETHUSDT","BCHUSDT","SOLUSDT","XRPUSDT"]
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_PER_TRADE = 0.01
 LEVERAGE = 5
 
+last_positions = {}
+wins = 0
+losses = 0
 cycle_count = 0
 
+# 📩 TELEGRAM
 def send_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -31,12 +33,14 @@ def send_msg(text):
     except:
         pass
 
+# 💰 BALANCE
 def get_balance():
     balance = client.futures_account_balance()
     for b in balance:
         if b["asset"] == "USDT":
             return float(b["balance"])
 
+# 🔍 PRECISIÓN BINANCE
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
@@ -59,13 +63,15 @@ def adjust_price(symbol, price):
     price = math.floor(price / tick) * tick
     return float(f"{price:.{precision}f}")
 
+# 🔒 CONTROL
 def has_any_position():
     for symbol in symbols:
-        positions = client.futures_position_information(symbol=symbol)
-        if positions and float(positions[0]["positionAmt"]) != 0:
+        pos = client.futures_position_information(symbol=symbol)
+        if pos and float(pos[0]["positionAmt"]) != 0:
             return True
     return False
 
+# 📈 DATA
 def get_data(symbol):
     klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
     df = pd.DataFrame(klines, columns=[
@@ -77,7 +83,7 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 🧠 ANALISIS MEJORADO
+# 🧠 NUEVA ESTRATEGIA
 def analyze_symbol(symbol):
     df = get_data(symbol)
 
@@ -87,37 +93,39 @@ def analyze_symbol(symbol):
 
     last = df.iloc[-1]
 
-    if last["ema50"] > last["ema200"]:
-        trend = "LONG"
-    elif last["ema50"] < last["ema200"]:
-        trend = "SHORT"
-    else:
-        print(f"{symbol} → EMA sin dirección")
-        return None
-
+    ema50 = last["ema50"]
+    ema200 = last["ema200"]
+    price = last["close"]
     rsi = last["rsi"]
 
-    print(f"{symbol} → Trend: {trend} | RSI: {round(rsi,2)}")
+    distance_to_ema = abs(price - ema50) / price
 
-    # 🔥 FILTRO RELAJADO
-    if trend == "LONG" and rsi < 50:
-        score = (50 - rsi)
-    elif trend == "SHORT" and rsi > 50:
-        score = (rsi - 50)
-    else:
-        return None
+    # LONG
+    if ema50 > ema200 and 40 < rsi < 55 and distance_to_ema < 0.003:
+        score = (55 - rsi) + (0.003 - distance_to_ema)*1000
+        return {
+            "symbol": symbol,
+            "side": "LONG",
+            "entry": price,
+            "stop": df["low"].tail(5).min(),
+            "score": score
+        }
 
-    entry = last["close"]
-    stop = df["low"].tail(5).min() if trend == "LONG" else df["high"].tail(5).max()
+    # SHORT
+    if ema50 < ema200 and 45 < rsi < 60 and distance_to_ema < 0.003:
+        score = (rsi - 45) + (0.003 - distance_to_ema)*1000
+        return {
+            "symbol": symbol,
+            "side": "SHORT",
+            "entry": price,
+            "stop": df["high"].tail(5).max(),
+            "score": score
+        }
 
-    return {
-        "symbol": symbol,
-        "side": trend,
-        "entry": entry,
-        "stop": stop,
-        "score": score
-    }
+    print(f"{symbol} → sin señal | RSI {round(rsi,1)}")
+    return None
 
+# 🏆 MEJOR TRADE
 def get_best_trade():
     candidates = []
 
@@ -131,18 +139,60 @@ def get_best_trade():
         return None
 
     best = max(candidates, key=lambda x: x["score"])
-
-    print(f"🏆 MEJOR: {best['symbol']} | score: {round(best['score'],2)}")
+    print(f"🏆 MEJOR: {best['symbol']}")
 
     return best
 
+# 📊 MÉTRICAS
+def check_closed_trades():
+    global last_positions, wins, losses
+
+    for symbol in symbols:
+        pos = client.futures_position_information(symbol=symbol)
+        if not pos:
+            continue
+
+        p = pos[0]
+        amt = float(p["positionAmt"])
+
+        if symbol in last_positions and amt == 0:
+            old = last_positions[symbol]
+
+            entry = old["entry"]
+            price = float(p["markPrice"])
+            qty = abs(old["qty"])
+            side = old["side"]
+
+            pnl = (price - entry)*qty if side=="LONG" else (entry - price)*qty
+
+            if pnl > 0:
+                wins += 1
+                emoji = "💰"
+            else:
+                losses += 1
+                emoji = "❌"
+
+            total = wins + losses
+            winrate = (wins/total)*100 if total else 0
+
+            send_msg(f"{emoji} {symbol} {round(pnl,2)} USDT | WR {round(winrate,1)}%")
+
+            del last_positions[symbol]
+
+        elif amt != 0:
+            last_positions[symbol] = {
+                "entry": float(p["entryPrice"]),
+                "qty": amt,
+                "side": "LONG" if amt>0 else "SHORT"
+            }
+
+# 🚀 EJECUCIÓN
 def open_trade():
     if has_any_position():
-        print("🔒 Ya hay trade activo")
+        print("🔒 trade activo")
         return
 
     best = get_best_trade()
-
     if not best:
         return
 
@@ -159,11 +209,10 @@ def open_trade():
         return
 
     qty = (risk / distance) * LEVERAGE
-    qty = min(qty, (balance * 0.2) / entry)
+    qty = min(qty, (balance*0.2)/entry)
     qty = adjust_qty(symbol, qty)
 
-    if qty * entry < 21:
-        print(f"{symbol} → menor a mínimo")
+    if qty*entry < 21:
         return
 
     client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
@@ -181,6 +230,7 @@ def open_trade():
 
     send_msg(f"🚀 {side} {symbol}")
 
+# 🔁 LOOP
 while True:
     try:
         cycle_count += 1
@@ -189,6 +239,7 @@ while True:
         if cycle_count % 10 == 0:
             send_msg("🤖 Bot activo")
 
+        check_closed_trades()
         open_trade()
 
         time.sleep(180)
