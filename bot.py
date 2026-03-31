@@ -9,28 +9,25 @@ client = Client(API_KEY, API_SECRET)
 
 symbol = "BCHUSDT"
 
-print("🚀 INICIO TEST ORDEN REAL")
+print("🚀 TEST ORDEN CORREGIDO")
 
 while True:
     try:
-        balance = client.futures_account_balance()
-        print("💰 Balance:", balance)
-
         client.futures_change_leverage(symbol=symbol, leverage=5)
 
-        print("📤 Enviando orden...")
+        print("📤 Enviando orden válida...")
 
         order = client.futures_create_order(
             symbol=symbol,
             side="BUY",
             type="MARKET",
-            quantity=0.001
+            quantity=0.002   # 🔥 MÁS GRANDE
         )
 
         print("✅ ORDEN EJECUTADA:", order)
         break
 
     except Exception as e:
-        print("❌ ERROR REAL BINANCE:", e)
+        print("❌ ERROR:", e)
 
     time.sleep(5)
