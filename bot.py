@@ -5,6 +5,7 @@ import time
 import os
 import requests
 import math
+import uuid
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
@@ -12,13 +13,11 @@ API_SECRET = os.getenv("API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-client = Client(API_KEY, API_SECRET)
+client = Client(API_KEY, API_SECRET, requests_params={"timeout": 10})
 
-# 🔥 PARES OPTIMIZADOS
 symbols = ["XRPUSDT","ADAUSDT","DOGEUSDT","SOLUSDT","MATICUSDT","TRXUSDT","LTCUSDT"]
 
 interval = Client.KLINE_INTERVAL_15MINUTE
-
 LEVERAGE = 5
 cycle_count = 0
 
@@ -27,8 +26,8 @@ def send_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text})
-    except Exception as e:
-        print("Telegram error:", e)
+    except:
+        pass
 
 # 💰 BALANCE
 def get_balance():
@@ -37,7 +36,7 @@ def get_balance():
         if b["asset"] == "USDT":
             return float(b["balance"])
 
-# 🔍 PRECISIÓN BINANCE
+# 🔍 PRECISIÓN
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
@@ -54,12 +53,15 @@ def adjust_qty(symbol, qty):
 
 def adjust_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
-    return math.floor(price / tick) * tick
+    return round(math.floor(price / tick) * tick, 6)
 
-# 🔒 CONTROL
-def has_position(symbol):
+# 🔒 POSICIONES
+def get_position_amt(symbol):
     pos = client.futures_position_information(symbol=symbol)
-    return pos and float(pos[0]["positionAmt"]) != 0
+    return float(pos[0]["positionAmt"])
+
+def has_position(symbol):
+    return get_position_amt(symbol) != 0
 
 def has_any_position():
     for s in symbols:
@@ -79,7 +81,7 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 🧠 SEÑAL
+# 🧠 SEÑAL MEJORADA
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -96,21 +98,55 @@ def get_signal(symbol):
 
     print(f"{symbol} → RSI {round(rsi,1)}")
 
-    # LONG
-    if ema50 > ema200 and rsi < 60:
-        return "LONG", price, df["low"].tail(5).min(), rsi
+    # LONG (pullback real)
+    if ema50 > ema200 and 35 < rsi < 50:
+        stop = df["low"].tail(5).min()
+        return "LONG", price, stop, rsi
 
     # SHORT
-    if ema50 < ema200 and rsi > 40:
-        return "SHORT", price, df["high"].tail(5).max(), rsi
+    if ema50 < ema200 and 50 < rsi < 65:
+        stop = df["high"].tail(5).max()
+        return "SHORT", price, stop, rsi
 
     return None, None, None, None
 
-# 🚀 EJECUCIÓN
+# 🚀 ORDEN SEGURA (ANTI -1007)
+def safe_order(symbol, side, qty):
+    client_id = str(uuid.uuid4())
+
+    try:
+        client.futures_create_order(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=qty,
+            newClientOrderId=client_id
+        )
+        return True
+
+    except Exception as e:
+        if "-1007" in str(e):
+            print("⚠️ Timeout, verificando...")
+
+            time.sleep(2)
+
+            if has_position(symbol):
+                print("✅ Orden sí ejecutada")
+                return True
+
+            print("❌ No ejecutada")
+            return False
+
+        else:
+            raise e
+
+# 🚀 TRADE
 def open_trade():
     if has_any_position():
         print("🔒 trade activo")
         return
+
+    balance = get_balance()
 
     for symbol in symbols:
 
@@ -119,8 +155,8 @@ def open_trade():
         if side is None:
             continue
 
-        # 🔥 FORZAR MÍNIMO BINANCE
-        qty = 21 / entry
+        risk_usdt = balance * 0.05  # 5% capital
+        qty = risk_usdt / entry
         qty = adjust_qty(symbol, qty)
 
         if qty <= 0:
@@ -128,44 +164,57 @@ def open_trade():
 
         client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
 
-        try:
-            if side == "LONG":
-                client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
-                sl_side = "SELL"
-            else:
-                client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
-                sl_side = "BUY"
+        if side == "LONG":
+            ok = safe_order(symbol, "BUY", qty)
+            sl_side = "SELL"
+            risk = entry - stop
+            tp = entry + (risk * 2)
 
-            stop = adjust_price(symbol, stop)
+        else:
+            ok = safe_order(symbol, "SELL", qty)
+            sl_side = "BUY"
+            risk = stop - entry
+            tp = entry - (risk * 2)
 
-            client.futures_create_order(
-                symbol=symbol,
-                side=sl_side,
-                type="STOP_MARKET",
-                stopPrice=stop,
-                closePosition=True
-            )
+        if not ok:
+            continue
 
-            notional = round(qty * entry, 2)
+        stop = adjust_price(symbol, stop)
+        tp = adjust_price(symbol, tp)
 
-            msg = f"""🚀 TRADE {side}
+        # STOP LOSS
+        client.futures_create_order(
+            symbol=symbol,
+            side=sl_side,
+            type="STOP_MARKET",
+            stopPrice=stop,
+            closePosition=True
+        )
+
+        # TAKE PROFIT
+        client.futures_create_order(
+            symbol=symbol,
+            side=sl_side,
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=tp,
+            closePosition=True
+        )
+
+        msg = f"""🚀 TRADE {side}
 Par: {symbol}
 
 💰 Entry: {round(entry,4)}
 🛑 SL: {round(stop,4)}
-📦 Qty: {qty} (~{notional} USDT)
+🎯 TP: {round(tp,4)}
+📦 Qty: {qty}
 
 📊 RSI: {round(rsi,2)}
 """
 
-            print(msg)
-            send_msg(msg)
+        print(msg)
+        send_msg(msg)
 
-            return
-
-        except Exception as e:
-            print("Error trade:", e)
-            send_msg(f"❌ {e}")
+        return
 
     print("⏳ Sin señal")
 
