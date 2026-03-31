@@ -14,16 +14,15 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-# 🔥 PARES OPTIMIZADOS PARA POCO CAPITAL
-symbols = ["XRPUSDT", "ADAUSDT", "DOGEUSDT", "SOLUSDT"]
+# 🔥 PARES OPTIMIZADOS
+symbols = ["XRPUSDT","ADAUSDT","DOGEUSDT","SOLUSDT","MATICUSDT","TRXUSDT","LTCUSDT"]
 
 interval = Client.KLINE_INTERVAL_15MINUTE
 
-RISK_PER_TRADE = 0.01
 LEVERAGE = 5
-
 cycle_count = 0
 
+# 📩 TELEGRAM
 def send_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -31,6 +30,7 @@ def send_msg(text):
     except Exception as e:
         print("Telegram error:", e)
 
+# 💰 BALANCE
 def get_balance():
     balance = client.futures_account_balance()
     for b in balance:
@@ -56,6 +56,7 @@ def adjust_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
     return math.floor(price / tick) * tick
 
+# 🔒 CONTROL
 def has_position(symbol):
     pos = client.futures_position_information(symbol=symbol)
     return pos and float(pos[0]["positionAmt"]) != 0
@@ -66,6 +67,7 @@ def has_any_position():
             return True
     return False
 
+# 📈 DATA
 def get_data(symbol):
     klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
     df = pd.DataFrame(klines, columns=[
@@ -77,7 +79,7 @@ def get_data(symbol):
     df["high"] = df["high"].astype(float)
     return df
 
-# 🧠 ESTRATEGIA SIMPLE (YA FUNCIONA)
+# 🧠 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -90,36 +92,35 @@ def get_signal(symbol):
     ema50 = last["ema50"]
     ema200 = last["ema200"]
     rsi = last["rsi"]
+    price = last["close"]
 
     print(f"{symbol} → RSI {round(rsi,1)}")
 
+    # LONG
     if ema50 > ema200 and rsi < 60:
-        return "LONG", last["close"], df["low"].tail(5).min()
+        return "LONG", price, df["low"].tail(5).min(), rsi
 
+    # SHORT
     if ema50 < ema200 and rsi > 40:
-        return "SHORT", last["close"], df["high"].tail(5).max()
+        return "SHORT", price, df["high"].tail(5).max(), rsi
 
-    return None, None, None
+    return None, None, None, None
 
 # 🚀 EJECUCIÓN
 def open_trade():
     if has_any_position():
-        print("🔒 Ya hay trade activo")
+        print("🔒 trade activo")
         return
 
     for symbol in symbols:
 
-        side, entry, stop = get_signal(symbol)
+        side, entry, stop, rsi = get_signal(symbol)
 
         if side is None:
             continue
 
-        balance = get_balance()
-
         # 🔥 FORZAR MÍNIMO BINANCE
         qty = 21 / entry
-
-        # 🔧 ajuste precisión
         qty = adjust_qty(symbol, qty)
 
         if qty <= 0:
@@ -145,7 +146,18 @@ def open_trade():
                 closePosition=True
             )
 
-            msg = f"🚀 {side} {symbol}\nQty: {qty}"
+            notional = round(qty * entry, 2)
+
+            msg = f"""🚀 TRADE {side}
+Par: {symbol}
+
+💰 Entry: {round(entry,4)}
+🛑 SL: {round(stop,4)}
+📦 Qty: {qty} (~{notional} USDT)
+
+📊 RSI: {round(rsi,2)}
+"""
+
             print(msg)
             send_msg(msg)
 
@@ -153,6 +165,7 @@ def open_trade():
 
         except Exception as e:
             print("Error trade:", e)
+            send_msg(f"❌ {e}")
 
     print("⏳ Sin señal")
 
