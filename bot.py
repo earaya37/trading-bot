@@ -21,13 +21,14 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
 cycle_count = 0
 
-# 🔥 CONFIG
 RISK_PERCENT = 0.12
 MIN_NOTIONAL = 15
 MAX_TRADES = 1
 
-# 🔥 TRACKING POSICIONES
+# 🔥 TRACKING
 last_positions = {}
+trade_data = {}
+start_balance = None
 
 # 📩 TELEGRAM
 def send_msg(text):
@@ -139,14 +140,12 @@ def get_signal(symbol):
 
     print(f"{symbol} → RSI {round(rsi,1)}")
 
-    # LONG
     if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
         if abs(price - stop)/price < 0.004:
             return None, None, None, None
         return "LONG", price, stop, rsi
 
-    # SHORT
     if ema50 < ema200 and 50 < rsi < 65 and rsi < prev_rsi:
         stop = df["high"].tail(5).max()
         if abs(price - stop)/price < 0.004:
@@ -175,9 +174,9 @@ def safe_order(symbol, side, qty):
         print("Order error:", e)
         return False
 
-# 🔔 DETECTAR CIERRES
+# 🔔 TRACKING PRO
 def check_closed_positions():
-    global last_positions
+    global last_positions, trade_data
 
     for symbol in symbols:
         current_amt = get_position_amt(symbol)
@@ -186,12 +185,46 @@ def check_closed_positions():
             prev_amt = last_positions[symbol]
 
             if prev_amt != 0 and current_amt == 0:
-                send_msg(f"✅ Trade cerrado en {symbol}")
+
+                if symbol in trade_data:
+                    entry = trade_data[symbol]["entry"]
+                    tp = trade_data[symbol]["tp"]
+                    sl = trade_data[symbol]["sl"]
+                    side = trade_data[symbol]["side"]
+
+                    price = float(get_data(symbol)["close"].iloc[-1])
+
+                    if side == "LONG":
+                        profit = price - entry
+                    else:
+                        profit = entry - price
+
+                    profit_usdt = round(profit * trade_data[symbol]["qty"], 2)
+                    profit_pct = round((profit / entry) * 100, 2)
+
+                    result = "🎯 TP" if (
+                        (side == "LONG" and price >= tp) or
+                        (side == "SHORT" and price <= tp)
+                    ) else "🛑 SL"
+
+                    msg = f"""📊 TRADE CERRADO {symbol}
+
+{result}
+
+💰 Resultado: {profit_usdt} USDT
+📈 %: {profit_pct}%
+
+"""
+                    send_msg(msg)
+
+                    del trade_data[symbol]
 
         last_positions[symbol] = current_amt
 
 # 🚀 TRADE
 def open_trade():
+    global trade_data
+
     if has_any_position():
         print("🔒 trade activo")
         return
@@ -236,15 +269,15 @@ def open_trade():
         if not ok:
             continue
 
-        stop = format_price(symbol, stop)
-        tp = format_price(symbol, tp)
+        stop_f = float(format_price(symbol, stop))
+        tp_f = float(format_price(symbol, tp))
 
         try:
             client.futures_create_order(
                 symbol=symbol,
                 side=sl_side,
                 type="STOP_MARKET",
-                stopPrice=stop,
+                stopPrice=str(stop_f),
                 closePosition=True
             )
 
@@ -252,20 +285,28 @@ def open_trade():
                 symbol=symbol,
                 side=sl_side,
                 type="TAKE_PROFIT_MARKET",
-                stopPrice=tp,
+                stopPrice=str(tp_f),
                 closePosition=True
             )
         except Exception as e:
             print("SL/TP error:", e)
 
+        # 🔥 guardar trade
+        trade_data[symbol] = {
+            "entry": entry,
+            "sl": stop_f,
+            "tp": tp_f,
+            "qty": float(qty),
+            "side": side
+        }
+
         msg = f"""🚀 TRADE {side}
 Par: {symbol}
 
 💰 Entry: {round(entry,4)}
-🛑 SL: {stop}
-🎯 TP: {tp}
+🛑 SL: {stop_f}
+🎯 TP: {tp_f}
 📦 Qty: {qty}
-💵 Notional: ~{round(float(qty)*entry,2)} USDT
 
 📊 RSI: {round(rsi,2)}
 """
