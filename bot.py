@@ -1,5 +1,7 @@
 import time
 
+print("🚨🚨🚨 NUEVO CODIGO EJECUTANDO 🚨🚨🚨")
+
 while True:
-    print("🔥 BOT VIVO LOOP OK")
+    print("🔥 LOOP FUNCIONANDO")
     time.sleep(5)
