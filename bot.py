@@ -59,17 +59,17 @@ for s in exchange_info["symbols"]:
         "priceDecimals": get_decimals(tick)
     }
 
-def adjust_qty(symbol, qty):
+def format_qty(symbol, qty):
     step = symbol_info[symbol]["stepSize"]
     decimals = symbol_info[symbol]["qtyDecimals"]
     qty = math.floor(qty / step) * step
-    return round(qty, decimals)
+    return f"{qty:.{decimals}f}"
 
-def adjust_price(symbol, price):
+def format_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
     decimals = symbol_info[symbol]["priceDecimals"]
     price = math.floor(price / tick) * tick
-    return round(price, decimals)
+    return f"{price:.{decimals}f}"
 
 # 🔒 POSICIONES
 def get_position_amt(symbol):
@@ -157,7 +157,7 @@ def safe_order(symbol, side, qty):
             if has_position(symbol):
                 return True
             return False
-        print(e)
+        print("Order error:", e)
         return False
 
 # 🚀 TRADE
@@ -178,9 +178,9 @@ def open_trade():
             continue
 
         risk_usdt = balance * 0.05
-        qty = adjust_qty(symbol, risk_usdt / entry)
+        qty = format_qty(symbol, risk_usdt / entry)
 
-        if qty <= 0:
+        if float(qty) <= 0:
             continue
 
         try:
@@ -202,8 +202,8 @@ def open_trade():
         if not ok:
             continue
 
-        stop = adjust_price(symbol, stop)
-        tp = adjust_price(symbol, tp)
+        stop = format_price(symbol, stop)
+        tp = format_price(symbol, tp)
 
         try:
             client.futures_create_order(
@@ -228,8 +228,8 @@ def open_trade():
 Par: {symbol}
 
 💰 Entry: {round(entry,4)}
-🛑 SL: {round(stop,4)}
-🎯 TP: {round(tp,4)}
+🛑 SL: {stop}
+🎯 TP: {tp}
 📦 Qty: {qty}
 
 📊 RSI: {round(rsi,2)}
