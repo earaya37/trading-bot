@@ -21,7 +21,10 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
 cycle_count = 0
 
-MIN_NOTIONAL = 5  # 🔥 clave
+# 🔥 CONFIGURACIÓN NUEVA
+RISK_PERCENT = 0.12       # 12% por trade
+MIN_NOTIONAL = 12         # mínimo real
+MAX_TRADES = 1            # evitar sobretrading
 
 # 📩 TELEGRAM
 def send_msg(text):
@@ -41,7 +44,7 @@ def get_balance():
     except:
         return 0
 
-# 🔍 PRECISION INFO
+# 🔍 PRECISION
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
@@ -90,10 +93,11 @@ def has_position(symbol):
     return abs(get_position_amt(symbol)) > 0
 
 def has_any_position():
+    count = 0
     for s in symbols:
         if has_position(s):
-            return True
-    return False
+            count += 1
+    return count >= MAX_TRADES
 
 # 📈 DATA
 def get_data(symbol):
@@ -110,7 +114,7 @@ def get_data(symbol):
     except:
         return None
 
-# 🧠 SEÑAL
+# 🧠 SEÑAL MEJORADA (CON CONFIRMACIÓN)
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -122,20 +126,28 @@ def get_signal(symbol):
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
     last = df.iloc[-1]
+    prev = df.iloc[-2]
 
     ema50 = last["ema50"]
     ema200 = last["ema200"]
     rsi = last["rsi"]
+    prev_rsi = prev["rsi"]
     price = last["close"]
 
     print(f"{symbol} → RSI {round(rsi,1)}")
 
-    if ema50 > ema200 and 35 < rsi < 50:
+    # LONG con confirmación
+    if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
+        if abs(price - stop)/price < 0.004:
+            return None, None, None, None
         return "LONG", price, stop, rsi
 
-    if ema50 < ema200 and 50 < rsi < 65:
+    # SHORT con confirmación
+    if ema50 < ema200 and 50 < rsi < 65 and rsi < prev_rsi:
         stop = df["high"].tail(5).max()
+        if abs(price - stop)/price < 0.004:
+            return None, None, None, None
         return "SHORT", price, stop, rsi
 
     return None, None, None, None
@@ -177,12 +189,11 @@ def open_trade():
         if side is None:
             continue
 
-        # 🔥 tamaño base
-        risk_usdt = balance * 0.05
+        # 🔥 NUEVO RIESGO
+        risk_usdt = balance * RISK_PERCENT
 
-        # 🔥 FORZAR mínimo Binance
         if risk_usdt < MIN_NOTIONAL:
-            risk_usdt = MIN_NOTIONAL + 1
+            risk_usdt = MIN_NOTIONAL
 
         qty = format_qty(symbol, risk_usdt / entry)
 
