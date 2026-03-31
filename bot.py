@@ -21,7 +21,6 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
 cycle_count = 0
 
-# 🔥 CONFIG HEDGE
 RISK_PERCENT = 0.10
 MIN_NOTIONAL = 15
 MAX_TRADES = 3
@@ -162,7 +161,7 @@ def safe_order(symbol, side, qty):
     except:
         return False
 
-# 🔔 TRACKING + TRAILING + BREAKEVEN
+# 🔔 GESTIÓN
 def manage_positions():
     global last_positions, trade_data
 
@@ -175,9 +174,8 @@ def manage_positions():
 
             price = float(get_data(symbol)["close"].iloc[-1])
 
-            # 🔥 break even
+            # BREAK EVEN
             if not trade_data[symbol].get("be"):
-
                 if (side == "LONG" and price > entry * 1.01) or \
                    (side == "SHORT" and price < entry * 0.99):
 
@@ -193,7 +191,7 @@ def manage_positions():
 
                     send_msg(f"🔒 Break-even activado en {symbol}")
 
-        # 🔥 detectar cierre
+        # DETECTAR CIERRE
         if symbol in last_positions:
             if last_positions[symbol] != 0 and amt == 0:
 
@@ -209,7 +207,10 @@ def manage_positions():
 
                     profit_usdt = round(profit * data["qty"], 2)
 
-                    send_msg(f"📊 Trade cerrado {symbol} → {profit_usdt} USDT")
+                    send_msg(f"""📊 TRADE CERRADO {symbol}
+
+💰 Resultado: {profit_usdt} USDT
+""")
 
                     del trade_data[symbol]
 
@@ -236,7 +237,6 @@ def open_trade():
             continue
 
         risk_usdt = max(balance * RISK_PERCENT, MIN_NOTIONAL)
-
         qty = format_qty(symbol, risk_usdt / entry)
 
         if float(qty) <= 0:
@@ -281,7 +281,19 @@ def open_trade():
             "side": side
         }
 
-        send_msg(f"🚀 {side} {symbol} | Qty: {qty}")
+        # 🔥 MENSAJE COMPLETO RESTAURADO
+        send_msg(f"""🚀 TRADE {side}
+Par: {symbol}
+
+💰 Entry: {round(entry,4)}
+🛑 SL: {stop}
+🎯 TP: {tp}
+📦 Qty: {qty}
+
+📊 RSI: {round(rsi,2)}
+""")
+
+        return
 
 # 🔁 LOOP
 while True:
