@@ -15,7 +15,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["XRPUSDT","ADAUSDT"]
+symbols = ["XRPUSDT"]  # SOLO estable
 
 interval = Client.KLINE_INTERVAL_15MINUTE
 
@@ -25,7 +25,9 @@ MAX_TRADES = 1
 COOLDOWN_MINUTES = 15
 BLOCK_TIME = 10
 MAX_DAILY_LOSS = 3
-MIN_SL_PERCENT = 0.004
+
+MIN_SL_PERCENT = 0.006
+MIN_NOTIONAL = 5
 
 last_trade_time = {}
 blocked_symbols = {}
@@ -40,11 +42,10 @@ def send_msg(text):
     except:
         pass
 
-# ================= PRECIO REAL =================
+# ================= MARKET =================
 def get_mark_price(symbol):
     try:
-        data = client.futures_mark_price(symbol=symbol)
-        return float(data["markPrice"])
+        return float(client.futures_mark_price(symbol=symbol)["markPrice"])
     except:
         return None
 
@@ -52,14 +53,9 @@ def get_mark_price(symbol):
 def get_position_amt(symbol):
     try:
         for p in client.futures_position_information(symbol=symbol):
-            if p["symbol"] == symbol:
-                return float(p["positionAmt"])
+            return float(p["positionAmt"])
     except:
         return 0.0
-    return 0.0
-
-def get_open_positions_count():
-    return sum(1 for s in symbols if abs(get_position_amt(s)) > 0)
 
 # ================= FORMAT =================
 exchange_info = client.futures_exchange_info()
@@ -73,43 +69,34 @@ for s in exchange_info["symbols"]:
     filters = {f["filterType"]: f for f in s["filters"]}
     step = float(filters["LOT_SIZE"]["stepSize"])
     tick = float(filters["PRICE_FILTER"]["tickSize"])
+    min_notional = float(filters["MIN_NOTIONAL"]["notional"])
 
     symbol_info[s["symbol"]] = {
-        "stepSize": step,
-        "tickSize": tick,
-        "qtyDecimals": get_decimals(step),
-        "priceDecimals": get_decimals(tick)
+        "step": step,
+        "tick": tick,
+        "min_notional": min_notional
     }
 
 def format_qty(symbol, qty):
-    step = symbol_info[symbol]["stepSize"]
-    d = symbol_info[symbol]["qtyDecimals"]
-    qty = math.floor(qty / step) * step
-    return float(f"{qty:.{d}f}")
+    step = symbol_info[symbol]["step"]
+    return math.floor(qty / step) * step
 
 def format_price(symbol, price):
-    tick = symbol_info[symbol]["tickSize"]
-    d = symbol_info[symbol]["priceDecimals"]
-    price = math.floor(price / tick) * tick
-    return float(f"{price:.{d}f}")
+    tick = symbol_info[symbol]["tick"]
+    return math.floor(price / tick) * tick
 
 # ================= DATA =================
 def get_data(symbol):
-    try:
-        k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
-        df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
-        df["c"] = df["c"].astype(float)
-        df["l"] = df["l"].astype(float)
-        df["h"] = df["h"].astype(float)
-        return df
-    except:
-        return None
+    k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
+    df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
+    df["c"] = df["c"].astype(float)
+    df["l"] = df["l"].astype(float)
+    df["h"] = df["h"].astype(float)
+    return df
 
 # ================= SEÑAL =================
 def get_signal(symbol):
     df = get_data(symbol)
-    if df is None or len(df) < 200:
-        return None,None,None
 
     df["ema50"] = ta.trend.ema_indicator(df["c"],50)
     df["ema200"] = ta.trend.ema_indicator(df["c"],200)
@@ -134,55 +121,28 @@ def get_signal(symbol):
 
     return None,None,None
 
-# ================= VALIDAR SL =================
-def validate_stop(symbol, side, stop):
+# ================= VALIDADOR TOTAL =================
+def validate_trade(symbol, side, entry, stop, qty):
+
     mark = get_mark_price(symbol)
     if mark is None:
         return False
 
-    # buffer mínimo 0.2%
-    if side == "SELL":  # LONG
-        return stop < mark * 0.998
-    else:  # SHORT
-        return stop > mark * 1.002
-
-# ================= SLTP =================
-def place_sl_tp(symbol, side, stop, tp):
-    try:
-
-        if not validate_stop(symbol, side, stop):
-            print("SL inválido por MARK PRICE")
-            return False
-
-        client.futures_create_order(
-            symbol=symbol,
-            side=side,
-            type="STOP_MARKET",
-            stopPrice=stop,
-            closePosition=True,
-            workingType="MARK_PRICE"
-        )
-
-        time.sleep(1)
-
-        orders = client.futures_get_open_orders(symbol=symbol)
-        if len(orders) == 0:
-            return False
-
-        client.futures_create_order(
-            symbol=symbol,
-            side=side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=tp,
-            closePosition=True,
-            workingType="MARK_PRICE"
-        )
-
-        return True
-
-    except Exception as e:
-        print("SLTP ERROR:", e)
+    # SL lógico respecto al precio real
+    if side == "LONG" and stop >= mark:
         return False
+    if side == "SHORT" and stop <= mark:
+        return False
+
+    # distancia mínima real
+    if abs(entry - stop)/entry < MIN_SL_PERCENT:
+        return False
+
+    # notional mínimo
+    if qty * entry < MIN_NOTIONAL:
+        return False
+
+    return True
 
 # ================= TRADE =================
 def open_trade():
@@ -193,74 +153,38 @@ def open_trade():
         current_day = datetime.now().day
 
     if daily_loss >= MAX_DAILY_LOSS:
-        send_msg("🛑 STOP DIARIO ACTIVADO")
+        send_msg("🛑 STOP DIARIO")
         return
 
-    if get_open_positions_count() >= MAX_TRADES:
+    if abs(get_position_amt("XRPUSDT")) > 0:
         return
 
-    for symbol in symbols:
+    symbol = "XRPUSDT"
 
-        if symbol in blocked_symbols and datetime.now() < blocked_symbols[symbol]:
-            continue
-
-        if abs(get_position_amt(symbol)) > 0:
-            continue
-
-        if symbol in last_trade_time:
-            if (datetime.now() - last_trade_time[symbol]).seconds/60 < COOLDOWN_MINUTES:
-                continue
-
-        side,entry,stop = get_signal(symbol)
-        if side is None:
-            continue
-
-        risk = abs(entry - stop)
-        qty = RISK_USDT / risk
-        qty = format_qty(symbol, qty)
-
-        if qty <= 0:
-            continue
-
-        order_side = "BUY" if side=="LONG" else "SELL"
-        sl_side = "SELL" if side=="LONG" else "BUY"
-
-        client.futures_create_order(symbol=symbol, side=order_side, type="MARKET", quantity=qty)
-
-        confirmed = False
-        for _ in range(10):
-            if abs(get_position_amt(symbol)) > 0:
-                confirmed = True
-                break
-            time.sleep(0.5)
-
-        if not confirmed:
-            blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
-            continue
-
-        # buffer extra
-        if side == "LONG":
-            stop *= 0.998
-            tp = entry + (entry - stop) * 2
-        else:
-            stop *= 1.002
-            tp = entry - (stop - entry) * 2
-
-        stop = format_price(symbol, stop)
-        tp = format_price(symbol, tp)
-
-        if not place_sl_tp(symbol, sl_side, stop, tp):
-            send_msg(f"❌ SL FALLÓ {symbol}")
-            real_qty = abs(get_position_amt(symbol))
-            client.futures_create_order(symbol=symbol, side=sl_side, type="MARKET", quantity=real_qty)
-            blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
-            daily_loss += 1
-            return
-
-        last_trade_time[symbol] = datetime.now()
-        send_msg(f"🚀 {side} {symbol} | riesgo $1")
-
+    if symbol in blocked_symbols and datetime.now() < blocked_symbols[symbol]:
         return
+
+    side,entry,stop = get_signal(symbol)
+    if side is None:
+        return
+
+    risk = abs(entry - stop)
+    qty = RISK_USDT / risk
+    qty = format_qty(symbol, qty)
+
+    if qty <= 0:
+        return
+
+    if not validate_trade(symbol, side, entry, stop, qty):
+        return
+
+    order_side = "BUY" if side=="LONG" else "SELL"
+    sl_side = "SELL" if side=="LONG" else "BUY"
+
+    # 🔒 SOLO AQUÍ se abre trade (todo validado)
+    client.futures_create_order(symbol=symbol, side=order_side, type="MARKET", quantity=qty)
+
+    send_msg(f"✅ TRADE LIMPIO {side} {symbol}")
 
 # ================= LOOP =================
 while True:
@@ -268,6 +192,5 @@ while True:
         open_trade()
         time.sleep(120)
     except Exception as e:
-        print(e)
         send_msg(f"❌ {e}")
         time.sleep(60)
