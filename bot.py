@@ -16,15 +16,16 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 client = Client(API_KEY, API_SECRET)
 
-symbols = ["XRPUSDT","ADAUSDT","DOGEUSDT","SOLUSDT","MATICUSDT","TRXUSDT","LTCUSDT"]
+symbols = ["XRPUSDT","ADAUSDT","DOGEUSDT","SOLUSDT","MATICUSDT"]  # 🔥 TRX fuera por estabilidad
+
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 LEVERAGE = 5
-RISK_PERCENT = 0.03   # 🔒 BAJADO para proteger capital
+RISK_PERCENT = 0.03
 MAX_TRADES = 3
 COOLDOWN_MINUTES = 15
 
-MIN_SL_PERCENT = 0.002
+MIN_SL_PERCENT = 0.004   # 🔥 aumentado para evitar errores
 MAX_NOTIONAL_PER_TRADE = 120
 
 # ================== CONTROL ==================
@@ -176,7 +177,8 @@ def place_sl_tp(symbol, sl_side, stop, tp):
             workingType="MARK_PRICE"
         )
         return True
-    except:
+    except Exception as e:
+        print("SLTP error:", e)
         return False
 
 def verify_sl_tp(symbol):
@@ -236,6 +238,7 @@ def open_trade():
         risk = balance*RISK_PERCENT
         risk_unit = abs(entry-stop)
         qty = risk/risk_unit
+
         if qty*entry > MAX_NOTIONAL_PER_TRADE:
             qty = MAX_NOTIONAL_PER_TRADE/entry
 
@@ -246,17 +249,17 @@ def open_trade():
         order_side = "BUY" if side=="LONG" else "SELL"
         sl_side = "SELL" if side=="LONG" else "BUY"
 
-        if not client.futures_create_order(symbol=symbol,side=order_side,type="MARKET",quantity=qty):
-            continue
+        client.futures_create_order(symbol=symbol,side=order_side,type="MARKET",quantity=qty)
 
         stop = format_price(symbol,stop)
         tp = format_price(symbol, entry + (entry-stop)*2 if side=="LONG" else entry-(stop-entry)*2)
 
-        time.sleep(1)
+        time.sleep(2)  # 🔥 importante
 
         place_sl_tp(symbol,sl_side,stop,tp)
 
         if not verify_sl_tp(symbol):
+            time.sleep(1)
             place_sl_tp(symbol,sl_side,stop,tp)
 
         if not verify_sl_tp(symbol):
