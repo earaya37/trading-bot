@@ -22,16 +22,14 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 LEVERAGE = 5
 
 RISK_PERCENT = 0.10
-MIN_NOTIONAL = 15
 MAX_TRADES = 3
-MAX_NOTIONAL_PER_TRADE = 120  # 🔥 límite para no sobreapalancarte
+MAX_NOTIONAL_PER_TRADE = 120
+
+# 🔥 NUEVO FILTRO
+MIN_SL_PERCENT = 0.002  # 0.2%
 
 last_positions = {}
 trade_data = {}
-
-daily_profit = 0
-wins = 0
-losses = 0
 
 def send_msg(text):
     try:
@@ -49,7 +47,6 @@ def get_balance():
     except:
         return 0
 
-# 🔥 CONFIGURAR ISOLATED + LEVERAGE
 def set_margin(symbol):
     try:
         client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
@@ -60,7 +57,6 @@ def set_margin(symbol):
     except:
         pass
 
-# 🔍 PRECISION
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
@@ -140,10 +136,20 @@ def get_signal(symbol):
 
     if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
+
+        # 🔥 FILTRO SL MÍNIMO
+        if abs(price - stop) / price < MIN_SL_PERCENT:
+            return None, None, None, None
+
         return "LONG", price, stop, rsi
 
     if ema50 < ema200 and 50 < rsi < 65 and rsi < prev_rsi:
         stop = df["high"].tail(5).max()
+
+        # 🔥 FILTRO SL MÍNIMO
+        if abs(price - stop) / price < MIN_SL_PERCENT:
+            return None, None, None, None
+
         return "SHORT", price, stop, rsi
 
     return None, None, None, None
@@ -180,7 +186,7 @@ def open_trade():
         if side is None:
             continue
 
-        set_margin(symbol)  # 🔥 CLAVE
+        set_margin(symbol)
 
         risk_usdt = balance * RISK_PERCENT
         risk_per_unit = abs(entry - stop)
@@ -189,10 +195,8 @@ def open_trade():
             continue
 
         qty = risk_usdt / risk_per_unit
-
         notional = qty * entry
 
-        # 🔥 limitar tamaño máximo
         if notional > MAX_NOTIONAL_PER_TRADE:
             qty = MAX_NOTIONAL_PER_TRADE / entry
 
