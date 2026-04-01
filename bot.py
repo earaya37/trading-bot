@@ -26,9 +26,16 @@ MAX_TRADES = 3
 MAX_NOTIONAL_PER_TRADE = 120
 MIN_SL_PERCENT = 0.002
 
-# 🔥 CONTROL DE DUPLICADOS
+# 🔥 CONTROL
 active_symbols = set()
+trade_data = {}
+last_positions = {}
 
+daily_profit = 0
+wins = 0
+losses = 0
+
+# 📩 TELEGRAM
 def send_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -36,6 +43,7 @@ def send_msg(text):
     except:
         pass
 
+# 💰 BALANCE
 def get_balance():
     try:
         balance = client.futures_account_balance()
@@ -45,6 +53,7 @@ def get_balance():
     except:
         return 0
 
+# ⚙️ ISOLATED + LEVERAGE
 def set_margin(symbol):
     try:
         client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
@@ -55,6 +64,7 @@ def set_margin(symbol):
     except:
         pass
 
+# 🔍 PRECISION
 exchange_info = client.futures_exchange_info()
 symbol_info = {}
 
@@ -86,6 +96,7 @@ def format_price(symbol, price):
     price = math.floor(price / tick) * tick
     return float(f"{price:.{decimals}f}")
 
+# 🔒 POSICIONES
 def get_position_amt(symbol):
     try:
         pos = client.futures_position_information(symbol=symbol)
@@ -99,6 +110,7 @@ def get_position_amt(symbol):
 def get_open_positions_count():
     return sum(1 for s in symbols if abs(get_position_amt(s)) > 0)
 
+# 📈 DATA
 def get_data(symbol):
     try:
         klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
@@ -113,6 +125,7 @@ def get_data(symbol):
     except:
         return None
 
+# 🧠 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -150,6 +163,7 @@ def get_signal(symbol):
 
     return None, None, None, None
 
+# 🚀 ORDEN SEGURA
 def safe_order(symbol, side, qty):
     try:
         client.futures_create_order(
@@ -163,6 +177,52 @@ def safe_order(symbol, side, qty):
     except:
         return False
 
+# 🔔 GESTIÓN (CIERRES)
+def manage_positions():
+    global active_symbols, trade_data, daily_profit, wins, losses, last_positions
+
+    for symbol in symbols:
+        amt = get_position_amt(symbol)
+
+        if symbol in last_positions:
+            if last_positions[symbol] != 0 and amt == 0:
+
+                if symbol in trade_data:
+                    data = trade_data[symbol]
+
+                    df = get_data(symbol)
+                    if df is None:
+                        continue
+
+                    price = float(df["close"].iloc[-1])
+
+                    if data["side"] == "LONG":
+                        profit = price - data["entry"]
+                    else:
+                        profit = data["entry"] - price
+
+                    profit_usdt = round(profit * data["qty"], 2)
+
+                    daily_profit += profit_usdt
+
+                    if profit_usdt > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+
+                    send_msg(f"""📊 TRADE CERRADO {symbol}
+
+💰 Resultado: {profit_usdt} USDT
+""")
+
+                    del trade_data[symbol]
+
+        if amt == 0 and symbol in active_symbols:
+            active_symbols.remove(symbol)
+
+        last_positions[symbol] = amt
+
+# 🚀 ABRIR TRADE
 def open_trade():
     global active_symbols
 
@@ -234,6 +294,12 @@ def open_trade():
             closePosition=True
         )
 
+        trade_data[symbol] = {
+            "entry": entry,
+            "qty": float(qty),
+            "side": side
+        }
+
         active_symbols.add(symbol)
 
         send_msg(f"""🚀 TRADE {side}
@@ -250,15 +316,7 @@ Par: {symbol}
 
         return
 
-def manage_positions():
-    global active_symbols
-
-    for symbol in symbols:
-        amt = get_position_amt(symbol)
-
-        if amt == 0 and symbol in active_symbols:
-            active_symbols.remove(symbol)
-
+# 🔁 LOOP
 while True:
     try:
         manage_positions()
