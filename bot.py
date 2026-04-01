@@ -40,6 +40,14 @@ def send_msg(text):
     except:
         pass
 
+# ================= PRECIO REAL =================
+def get_mark_price(symbol):
+    try:
+        data = client.futures_mark_price(symbol=symbol)
+        return float(data["markPrice"])
+    except:
+        return None
+
 # ================= POSICIÓN =================
 def get_position_amt(symbol):
     try:
@@ -126,11 +134,26 @@ def get_signal(symbol):
 
     return None,None,None
 
+# ================= VALIDAR SL =================
+def validate_stop(symbol, side, stop):
+    mark = get_mark_price(symbol)
+    if mark is None:
+        return False
+
+    # buffer mínimo 0.2%
+    if side == "SELL":  # LONG
+        return stop < mark * 0.998
+    else:  # SHORT
+        return stop > mark * 1.002
+
 # ================= SLTP =================
 def place_sl_tp(symbol, side, stop, tp):
     try:
 
-        # STOP LOSS (FIX DEFINITIVO)
+        if not validate_stop(symbol, side, stop):
+            print("SL inválido por MARK PRICE")
+            return False
+
         client.futures_create_order(
             symbol=symbol,
             side=side,
@@ -146,7 +169,6 @@ def place_sl_tp(symbol, side, stop, tp):
         if len(orders) == 0:
             return False
 
-        # TAKE PROFIT
         client.futures_create_order(
             symbol=symbol,
             side=side,
@@ -203,15 +225,8 @@ def open_trade():
         order_side = "BUY" if side=="LONG" else "SELL"
         sl_side = "SELL" if side=="LONG" else "BUY"
 
-        # abrir posición
-        client.futures_create_order(
-            symbol=symbol,
-            side=order_side,
-            type="MARKET",
-            quantity=qty
-        )
+        client.futures_create_order(symbol=symbol, side=order_side, type="MARKET", quantity=qty)
 
-        # confirmar posición real
         confirmed = False
         for _ in range(10):
             if abs(get_position_amt(symbol)) > 0:
@@ -223,12 +238,12 @@ def open_trade():
             blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
             continue
 
-        # buffer anti rechazo
+        # buffer extra
         if side == "LONG":
-            stop *= 0.999
+            stop *= 0.998
             tp = entry + (entry - stop) * 2
         else:
-            stop *= 1.001
+            stop *= 1.002
             tp = entry - (stop - entry) * 2
 
         stop = format_price(symbol, stop)
@@ -237,12 +252,7 @@ def open_trade():
         if not place_sl_tp(symbol, sl_side, stop, tp):
             send_msg(f"❌ SL FALLÓ {symbol}")
             real_qty = abs(get_position_amt(symbol))
-            client.futures_create_order(
-                symbol=symbol,
-                side=sl_side,
-                type="MARKET",
-                quantity=real_qty
-            )
+            client.futures_create_order(symbol=symbol, side=sl_side, type="MARKET", quantity=real_qty)
             blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
             daily_loss += 1
             return
