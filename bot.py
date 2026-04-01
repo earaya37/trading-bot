@@ -20,12 +20,9 @@ TIMEFRAME = "15m"
 LEVERAGE = 5
 RISK_USDT = 1
 
-EMA_FAST = 50
-EMA_SLOW = 200
-RSI_PERIOD = 14
+LOOKBACK = 20
 ATR_PERIOD = 14
-
-ATR_MIN = 0.0002  # 🔥 más permisivo
+ATR_MIN = 0.0002
 
 client = Client(API_KEY, API_SECRET)
 
@@ -42,7 +39,7 @@ def send(msg):
 
 # ===== DATA =====
 def get_klines(symbol):
-    klines = client.futures_klines(symbol=symbol, interval=TIMEFRAME, limit=300)
+    klines = client.futures_klines(symbol=symbol, interval=TIMEFRAME, limit=200)
     df = pd.DataFrame(klines, columns=[
         "time","open","high","low","close","volume",
         "_","_","_","_","_","_"
@@ -50,18 +47,15 @@ def get_klines(symbol):
     df["close"] = df["close"].astype(float)
     df["high"] = df["high"].astype(float)
     df["low"] = df["low"].astype(float)
+    df["volume"] = df["volume"].astype(float)
     return df
 
 # ===== INDICADORES =====
 def calculate_indicators(df):
-    df["ema50"] = df["close"].ewm(span=EMA_FAST).mean()
-    df["ema200"] = df["close"].ewm(span=EMA_SLOW).mean()
+    df["max_high"] = df["high"].rolling(LOOKBACK).max()
+    df["min_low"] = df["low"].rolling(LOOKBACK).min()
 
-    delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(RSI_PERIOD).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(RSI_PERIOD).mean()
-    rs = gain / loss
-    df["rsi"] = 100 - (100 / (1 + rs))
+    df["vol_avg"] = df["volume"].rolling(20).mean()
 
     df["tr"] = np.maximum(df["high"] - df["low"],
               np.maximum(abs(df["high"] - df["close"].shift()),
@@ -88,15 +82,11 @@ def get_position(symbol):
 
 # ===== TAMAÑO =====
 def calc_qty(price):
-    qty = (RISK_USDT * LEVERAGE) / price
-    return round(qty, 3)
+    return round((RISK_USDT * LEVERAGE) / price, 3)
 
 # ===== ORDEN =====
 def open_trade(symbol, side, price, atr):
     qty = calc_qty(price)
-
-    if qty <= 0:
-        return
 
     try:
         client.futures_create_order(
@@ -106,8 +96,8 @@ def open_trade(symbol, side, price, atr):
             quantity=qty
         )
 
-        sl = price - atr * 1.2 if side == "LONG" else price + atr * 1.2
-        tp = price + atr * 1.8 if side == "LONG" else price - atr * 1.8
+        sl = price - atr if side == "LONG" else price + atr
+        tp = price + atr*2 if side == "LONG" else price - atr*2
 
         client.futures_create_order(
             symbol=symbol,
@@ -125,42 +115,41 @@ def open_trade(symbol, side, price, atr):
             closePosition=True
         )
 
-        msg = f"{side} {symbol}\nQty: {qty}\nSL: {round(sl,4)}\nTP: {round(tp,4)}"
+        msg = f"{side} {symbol}\nQty: {qty}"
         print(msg)
         send(msg)
 
     except Exception as e:
         print(f"❌ {symbol} order error: {e}")
 
-# ===== LÓGICA MÁS ACTIVA =====
+# ===== LÓGICA BREAKOUT =====
 def check_signal(df):
     last = df.iloc[-1]
+    prev = df.iloc[-2]
 
     if not all(map(safe, [
-        last["ema50"], last["ema200"], last["rsi"], last["atr"]
+        last["max_high"], last["min_low"], last["atr"], last["vol_avg"]
     ])):
         return None
 
     if last["atr"] < ATR_MIN:
         return None
 
-    price = last["close"]
-
-    # 🔥 LONG MÁS FLEXIBLE
-    if last["ema50"] > last["ema200"]:
-        if price > last["ema50"] and last["rsi"] > 42:
+    # LONG breakout
+    if last["close"] > prev["max_high"]:
+        if last["volume"] > last["vol_avg"]:
             return "LONG"
 
-    # 🔥 SHORT MÁS FLEXIBLE
-    if last["ema50"] < last["ema200"]:
-        if price < last["ema50"] and last["rsi"] < 58:
+    # SHORT breakout
+    if last["close"] < prev["min_low"]:
+        if last["volume"] > last["vol_avg"]:
             return "SHORT"
 
     return None
 
 # ===== LOOP =====
 def run():
-    print("🚀 BOT MODO ACTIVO (YA DEBE OPERAR)")
+    print("🚀 BREAKOUT BOT ACTIVO")
 
     while True:
         for symbol in SYMBOLS:
