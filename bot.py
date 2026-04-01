@@ -24,12 +24,10 @@ LEVERAGE = 5
 RISK_PERCENT = 0.10
 MAX_TRADES = 3
 MAX_NOTIONAL_PER_TRADE = 120
+MIN_SL_PERCENT = 0.002
 
-# 🔥 NUEVO FILTRO
-MIN_SL_PERCENT = 0.002  # 0.2%
-
-last_positions = {}
-trade_data = {}
+# 🔥 CONTROL DE DUPLICADOS
+active_symbols = set()
 
 def send_msg(text):
     try:
@@ -137,7 +135,6 @@ def get_signal(symbol):
     if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
 
-        # 🔥 FILTRO SL MÍNIMO
         if abs(price - stop) / price < MIN_SL_PERCENT:
             return None, None, None, None
 
@@ -146,7 +143,6 @@ def get_signal(symbol):
     if ema50 < ema200 and 50 < rsi < 65 and rsi < prev_rsi:
         stop = df["high"].tail(5).max()
 
-        # 🔥 FILTRO SL MÍNIMO
         if abs(price - stop) / price < MIN_SL_PERCENT:
             return None, None, None, None
 
@@ -168,6 +164,8 @@ def safe_order(symbol, side, qty):
         return False
 
 def open_trade():
+    global active_symbols
+
     if get_open_positions_count() >= MAX_TRADES:
         return
 
@@ -178,7 +176,7 @@ def open_trade():
         if get_open_positions_count() >= MAX_TRADES:
             return
 
-        if abs(get_position_amt(symbol)) > 0:
+        if symbol in active_symbols or abs(get_position_amt(symbol)) > 0:
             continue
 
         side, entry, stop, rsi = get_signal(symbol)
@@ -236,6 +234,8 @@ def open_trade():
             closePosition=True
         )
 
+        active_symbols.add(symbol)
+
         send_msg(f"""🚀 TRADE {side}
 Par: {symbol}
 
@@ -250,8 +250,18 @@ Par: {symbol}
 
         return
 
+def manage_positions():
+    global active_symbols
+
+    for symbol in symbols:
+        amt = get_position_amt(symbol)
+
+        if amt == 0 and symbol in active_symbols:
+            active_symbols.remove(symbol)
+
 while True:
     try:
+        manage_positions()
         open_trade()
         time.sleep(120)
     except Exception as e:
