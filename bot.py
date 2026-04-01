@@ -24,7 +24,8 @@ EMA_FAST = 50
 EMA_SLOW = 200
 RSI_PERIOD = 14
 ATR_PERIOD = 14
-ATR_MIN = 0.0005
+
+ATR_MIN = 0.0002  # 🔥 más permisivo
 
 client = Client(API_KEY, API_SECRET)
 
@@ -98,7 +99,6 @@ def open_trade(symbol, side, price, atr):
         return
 
     try:
-        # MARKET ENTRY
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_BUY if side == "LONG" else SIDE_SELL,
@@ -106,11 +106,9 @@ def open_trade(symbol, side, price, atr):
             quantity=qty
         )
 
-        # SL / TP dinámico
         sl = price - atr * 1.2 if side == "LONG" else price + atr * 1.2
-        tp = price + atr * 2 if side == "LONG" else price - atr * 2
+        tp = price + atr * 1.8 if side == "LONG" else price - atr * 1.8
 
-        # STOP LOSS
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_SELL if side == "LONG" else SIDE_BUY,
@@ -119,7 +117,6 @@ def open_trade(symbol, side, price, atr):
             closePosition=True
         )
 
-        # TAKE PROFIT
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_SELL if side == "LONG" else SIDE_BUY,
@@ -135,7 +132,7 @@ def open_trade(symbol, side, price, atr):
     except Exception as e:
         print(f"❌ {symbol} order error: {e}")
 
-# ===== LÓGICA OPTIMIZADA =====
+# ===== LÓGICA MÁS ACTIVA =====
 def check_signal(df):
     last = df.iloc[-1]
 
@@ -144,27 +141,26 @@ def check_signal(df):
     ])):
         return None
 
-    # FILTRO ATR
     if last["atr"] < ATR_MIN:
         return None
 
     price = last["close"]
 
-    # LONG (más flexible)
+    # 🔥 LONG MÁS FLEXIBLE
     if last["ema50"] > last["ema200"]:
-        if price > last["ema50"] and last["rsi"] > 45:
+        if price > last["ema50"] and last["rsi"] > 42:
             return "LONG"
 
-    # SHORT (más flexible)
+    # 🔥 SHORT MÁS FLEXIBLE
     if last["ema50"] < last["ema200"]:
-        if price < last["ema50"] and last["rsi"] < 55:
+        if price < last["ema50"] and last["rsi"] < 58:
             return "SHORT"
 
     return None
 
 # ===== LOOP =====
 def run():
-    print("🚀 BOT FASE 3 MULTIPAIR ACTIVO")
+    print("🚀 BOT MODO ACTIVO (YA DEBE OPERAR)")
 
     while True:
         for symbol in SYMBOLS:
@@ -183,8 +179,7 @@ def run():
             except Exception as e:
                 print(f"❌ {symbol} loop error: {e}")
 
-        time.sleep(30)
+        time.sleep(20)
 
-# ===== START =====
 if __name__ == "__main__":
     run()
