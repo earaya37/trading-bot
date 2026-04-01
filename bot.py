@@ -21,10 +21,10 @@ interval = Client.KLINE_INTERVAL_15MINUTE
 RISK_USDT = 1
 MIN_SL_PERCENT = 0.006
 MIN_NOTIONAL = 5
-MAX_DAILY_LOSS = 3
 
-daily_loss = 0
-current_day = datetime.now().day
+last_error = None
+error_count = 0
+MAX_ERRORS = 5
 
 # ================= TELEGRAM =================
 def send_msg(text):
@@ -35,7 +35,7 @@ def send_msg(text):
         pass
 
 # ================= HELPERS =================
-def is_valid_number(x):
+def is_valid(x):
     return x is not None and not (isinstance(x, float) and math.isnan(x))
 
 # ================= MARKET =================
@@ -62,9 +62,6 @@ tick = float(next(f for f in filters if f["filterType"]=="PRICE_FILTER")["tickSi
 
 def format_qty(q):
     return math.floor(q / step) * step
-
-def format_price(p):
-    return math.floor(p / tick) * tick
 
 # ================= DATA =================
 def get_data():
@@ -94,88 +91,48 @@ def get_signal():
 
     price = last["c"]
 
-    if not is_valid_number(price):
+    if not is_valid(price):
         return None,None,None
 
     if last["ema50"] > last["ema200"] and 40 < last["rsi"] < 55 and last["rsi"] > prev["rsi"]:
         stop = df["l"].tail(5).min()
-
-        if not is_valid_number(stop):
+        if not is_valid(stop):
             return None,None,None
-
         if abs(price-stop)/price < MIN_SL_PERCENT:
             return None,None,None
-
         return "LONG",price,stop
 
     if last["ema50"] < last["ema200"] and 45 < last["rsi"] < 60 and last["rsi"] < prev["rsi"]:
         stop = df["h"].tail(5).max()
-
-        if not is_valid_number(stop):
+        if not is_valid(stop):
             return None,None,None
-
         if abs(price-stop)/price < MIN_SL_PERCENT:
             return None,None,None
-
         return "SHORT",price,stop
 
     return None,None,None
 
-# ================= VALIDACIÓN =================
-def validate_trade(side, entry, stop, qty):
-
-    if not is_valid_number(entry) or not is_valid_number(stop):
-        return False
-
-    mark = get_mark_price()
-    if not is_valid_number(mark):
-        return False
-
-    if side == "LONG" and stop >= mark:
-        return False
-
-    if side == "SHORT" and stop <= mark:
-        return False
-
-    if qty * entry < MIN_NOTIONAL:
-        return False
-
-    return True
-
 # ================= TRADE =================
 def open_trade():
-    global daily_loss, current_day
-
-    if datetime.now().day != current_day:
-        daily_loss = 0
-        current_day = datetime.now().day
-
-    if daily_loss >= MAX_DAILY_LOSS:
-        send_msg("🛑 STOP DIARIO")
-        return
-
-    if abs(get_position_amt()) > 0:
-        return
-
     side,entry,stop = get_signal()
 
-    if side is None:
-        return
-
-    if not is_valid_number(entry) or not is_valid_number(stop):
+    if side is None or not is_valid(entry) or not is_valid(stop):
         return
 
     risk = abs(entry - stop)
-    if not is_valid_number(risk) or risk == 0:
+    if not is_valid(risk) or risk == 0:
         return
 
     qty = RISK_USDT / risk
     qty = format_qty(qty)
 
-    if not is_valid_number(qty) or qty <= 0:
+    if qty <= 0:
         return
 
-    if not validate_trade(side, entry, stop, qty):
+    if qty * entry < MIN_NOTIONAL:
+        return
+
+    if abs(get_position_amt()) > 0:
         return
 
     order_side = "BUY" if side=="LONG" else "SELL"
@@ -194,6 +151,18 @@ while True:
     try:
         open_trade()
         time.sleep(120)
+
     except Exception as e:
-        send_msg(f"❌ {e}")
+        error = str(e)
+
+        # evitar spam
+        if error != last_error:
+            send_msg(f"❌ {error}")
+
+        error_count += 1
+
+        if error_count >= MAX_ERRORS:
+            send_msg("🛑 BOT DETENIDO POR ERRORES")
+            break
+
         time.sleep(60)
