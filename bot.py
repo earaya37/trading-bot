@@ -1,114 +1,12 @@
-from binance.client import Client
-import pandas as pd
-import ta
-import time
-import os
-import requests
-import math
-import uuid
-from datetime import datetime
-
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-client = Client(API_KEY, API_SECRET, requests_params={"timeout": 10})
-
-symbols = ["XRPUSDT","ADAUSDT","DOGEUSDT","SOLUSDT","MATICUSDT","TRXUSDT","LTCUSDT"]
-
-interval = Client.KLINE_INTERVAL_15MINUTE
-LEVERAGE = 5
-
-RISK_PERCENT = 0.10
-MAX_TRADES = 3
-MAX_NOTIONAL_PER_TRADE = 120
-MIN_SL_PERCENT = 0.002
-
-# 🔥 CONTROL
+# ⚙️ CONFIG EXTRA
+COOLDOWN_MINUTES = 15
+last_trade_time = {}
 active_symbols = set()
-trade_data = {}
 last_positions = {}
 
-daily_profit = 0
-wins = 0
-losses = 0
+MIN_SL_PERCENT = 0.002  # 0.2%
+MAX_NOTIONAL_PER_TRADE = 120
 
-# 📩 TELEGRAM
-def send_msg(text):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
-    except:
-        pass
-
-# 💰 BALANCE
-def get_balance():
-    try:
-        balance = client.futures_account_balance()
-        for b in balance:
-            if b["asset"] == "USDT":
-                return float(b["balance"])
-    except:
-        return 0
-
-# ⚙️ ISOLATED + LEVERAGE
-def set_margin(symbol):
-    try:
-        client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
-    except:
-        pass
-    try:
-        client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
-    except:
-        pass
-
-# 🔍 PRECISION
-exchange_info = client.futures_exchange_info()
-symbol_info = {}
-
-def get_decimals(step):
-    step_str = "{:f}".format(step)
-    return len(step_str.rstrip('0').split('.')[1]) if '.' in step_str else 0
-
-for s in exchange_info["symbols"]:
-    filters = {f["filterType"]: f for f in s["filters"]}
-    step = float(filters["LOT_SIZE"]["stepSize"])
-    tick = float(filters["PRICE_FILTER"]["tickSize"])
-
-    symbol_info[s["symbol"]] = {
-        "stepSize": step,
-        "tickSize": tick,
-        "qtyDecimals": get_decimals(step),
-        "priceDecimals": get_decimals(tick)
-    }
-
-def format_qty(symbol, qty):
-    step = symbol_info[symbol]["stepSize"]
-    decimals = symbol_info[symbol]["qtyDecimals"]
-    qty = math.floor(qty / step) * step
-    return float(f"{qty:.{decimals}f}")
-
-def format_price(symbol, price):
-    tick = symbol_info[symbol]["tickSize"]
-    decimals = symbol_info[symbol]["priceDecimals"]
-    price = math.floor(price / tick) * tick
-    return float(f"{price:.{decimals}f}")
-
-# 🔒 POSICIONES
-def get_position_amt(symbol):
-    try:
-        pos = client.futures_position_information(symbol=symbol)
-        for p in pos:
-            if p["symbol"] == symbol:
-                return float(p["positionAmt"])
-        return 0.0
-    except:
-        return 0.0
-
-def get_open_positions_count():
-    return sum(1 for s in symbols if abs(get_position_amt(s)) > 0)
 
 # 📈 DATA
 def get_data(symbol):
@@ -125,11 +23,12 @@ def get_data(symbol):
     except:
         return None
 
+
 # 🧠 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 200:
         return None, None, None, None
 
     df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
@@ -145,7 +44,8 @@ def get_signal(symbol):
     prev_rsi = prev["rsi"]
     price = last["close"]
 
-    if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
+    # 🟢 LONG
+    if ema50 > ema200 and 40 < rsi < 55 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
 
         if abs(price - stop) / price < MIN_SL_PERCENT:
@@ -153,7 +53,8 @@ def get_signal(symbol):
 
         return "LONG", price, stop, rsi
 
-    if ema50 < ema200 and 50 < rsi < 65 and rsi < prev_rsi:
+    # 🔴 SHORT
+    if ema50 < ema200 and 45 < rsi < 60 and rsi < prev_rsi:
         stop = df["high"].tail(5).max()
 
         if abs(price - stop) / price < MIN_SL_PERCENT:
@@ -162,6 +63,20 @@ def get_signal(symbol):
         return "SHORT", price, stop, rsi
 
     return None, None, None, None
+
+
+# 🔒 FORZAR ISOLATED + LEVERAGE
+def set_margin(symbol):
+    try:
+        client.futures_change_margin_type(symbol=symbol, marginType="ISOLATED")
+    except:
+        pass
+
+    try:
+        client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+    except:
+        pass
+
 
 # 🚀 ORDEN SEGURA
 def safe_order(symbol, side, qty):
@@ -177,54 +92,56 @@ def safe_order(symbol, side, qty):
     except:
         return False
 
-# 🔔 GESTIÓN (CIERRES)
+
+# 🔔 GESTIÓN (CIERRES REALES)
 def manage_positions():
-    global active_symbols, trade_data, daily_profit, wins, losses, last_positions
+    global trade_data, daily_profit, wins, losses
 
     for symbol in symbols:
         amt = get_position_amt(symbol)
 
+        # detectar cierre REAL
         if symbol in last_positions:
             if last_positions[symbol] != 0 and amt == 0:
 
                 if symbol in trade_data:
-                    data = trade_data[symbol]
 
-                    df = get_data(symbol)
-                    if df is None:
-                        continue
+                    entry = trade_data[symbol]["entry"]
+                    qty = trade_data[symbol]["qty"]
+                    side = trade_data[symbol]["side"]
 
-                    price = float(df["close"].iloc[-1])
+                    # 🔥 usamos mark price actual
+                    ticker = client.futures_mark_price(symbol=symbol)
+                    price = float(ticker["markPrice"])
 
-                    if data["side"] == "LONG":
-                        profit = price - data["entry"]
+                    if side == "LONG":
+                        profit = (price - entry) * qty
                     else:
-                        profit = data["entry"] - price
+                        profit = (entry - price) * qty
 
-                    profit_usdt = round(profit * data["qty"], 2)
+                    profit = round(profit, 2)
 
-                    daily_profit += profit_usdt
+                    daily_profit += profit
 
-                    if profit_usdt > 0:
+                    if profit > 0:
                         wins += 1
                     else:
                         losses += 1
 
                     send_msg(f"""📊 TRADE CERRADO {symbol}
 
-💰 Resultado: {profit_usdt} USDT
+💰 Resultado: {profit} USDT
+📈 Balance día: {round(daily_profit,2)}
 """)
 
                     del trade_data[symbol]
 
-        if amt == 0 and symbol in active_symbols:
-            active_symbols.remove(symbol)
-
         last_positions[symbol] = amt
+
 
 # 🚀 ABRIR TRADE
 def open_trade():
-    global active_symbols
+    global active_symbols, last_trade_time
 
     if get_open_positions_count() >= MAX_TRADES:
         return
@@ -233,11 +150,15 @@ def open_trade():
 
     for symbol in symbols:
 
-        if get_open_positions_count() >= MAX_TRADES:
-            return
-
-        if symbol in active_symbols or abs(get_position_amt(symbol)) > 0:
+        # ❌ evitar duplicados
+        if abs(get_position_amt(symbol)) > 0:
             continue
+
+        # ❌ cooldown
+        if symbol in last_trade_time:
+            elapsed = (datetime.now() - last_trade_time[symbol]).seconds / 60
+            if elapsed < COOLDOWN_MINUTES:
+                continue
 
         side, entry, stop, rsi = get_signal(symbol)
 
@@ -255,22 +176,24 @@ def open_trade():
         qty = risk_usdt / risk_per_unit
         notional = qty * entry
 
+        # 🔒 limitar tamaño
         if notional > MAX_NOTIONAL_PER_TRADE:
             qty = MAX_NOTIONAL_PER_TRADE / entry
 
-        qty = format_qty(symbol, qty)
+        qty = float(format_qty(symbol, qty))
 
         if qty <= 0:
             continue
 
+        # 🚀 ejecutar
         if side == "LONG":
             ok = safe_order(symbol, "BUY", qty)
             sl_side = "SELL"
-            tp = entry + (abs(entry - stop) * 2)
+            tp = entry + (risk_per_unit * 2)
         else:
             ok = safe_order(symbol, "SELL", qty)
             sl_side = "BUY"
-            tp = entry - (abs(entry - stop) * 2)
+            tp = entry - (risk_per_unit * 2)
 
         if not ok:
             continue
@@ -278,6 +201,7 @@ def open_trade():
         stop = format_price(symbol, stop)
         tp = format_price(symbol, tp)
 
+        # 🛑 SL
         client.futures_create_order(
             symbol=symbol,
             side=sl_side,
@@ -286,6 +210,7 @@ def open_trade():
             closePosition=True
         )
 
+        # 🎯 TP
         client.futures_create_order(
             symbol=symbol,
             side=sl_side,
@@ -296,11 +221,11 @@ def open_trade():
 
         trade_data[symbol] = {
             "entry": entry,
-            "qty": float(qty),
+            "qty": qty,
             "side": side
         }
 
-        active_symbols.add(symbol)
+        last_trade_time[symbol] = datetime.now()
 
         send_msg(f"""🚀 TRADE {side}
 Par: {symbol}
@@ -315,6 +240,7 @@ Par: {symbol}
 """)
 
         return
+
 
 # 🔁 LOOP
 while True:
