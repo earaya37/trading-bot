@@ -5,7 +5,7 @@ import time
 import os
 import requests
 import math
-from datetime import datetime, timedelta
+from datetime import datetime
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
@@ -16,7 +16,6 @@ CHAT_ID = os.getenv("CHAT_ID")
 client = Client(API_KEY, API_SECRET)
 
 symbol = "XRPUSDT"
-
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_USDT = 1
@@ -34,6 +33,10 @@ def send_msg(text):
         requests.post(url, data={"chat_id": CHAT_ID, "text": text})
     except:
         pass
+
+# ================= HELPERS =================
+def is_valid_number(x):
+    return x is not None and not (isinstance(x, float) and math.isnan(x))
 
 # ================= MARKET =================
 def get_mark_price():
@@ -65,12 +68,15 @@ def format_price(p):
 
 # ================= DATA =================
 def get_data():
-    k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
-    df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
-    df["c"] = df["c"].astype(float)
-    df["l"] = df["l"].astype(float)
-    df["h"] = df["h"].astype(float)
-    return df
+    try:
+        k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
+        df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
+        df["c"] = df["c"].astype(float)
+        df["l"] = df["l"].astype(float)
+        df["h"] = df["h"].astype(float)
+        return df
+    except:
+        return None
 
 # ================= SEÑAL =================
 def get_signal():
@@ -88,20 +94,29 @@ def get_signal():
 
     price = last["c"]
 
+    if not is_valid_number(price):
+        return None,None,None
+
     if last["ema50"] > last["ema200"] and 40 < last["rsi"] < 55 and last["rsi"] > prev["rsi"]:
         stop = df["l"].tail(5).min()
-        if stop is None:
+
+        if not is_valid_number(stop):
             return None,None,None
+
         if abs(price-stop)/price < MIN_SL_PERCENT:
             return None,None,None
+
         return "LONG",price,stop
 
     if last["ema50"] < last["ema200"] and 45 < last["rsi"] < 60 and last["rsi"] < prev["rsi"]:
         stop = df["h"].tail(5).max()
-        if stop is None:
+
+        if not is_valid_number(stop):
             return None,None,None
+
         if abs(price-stop)/price < MIN_SL_PERCENT:
             return None,None,None
+
         return "SHORT",price,stop
 
     return None,None,None
@@ -109,11 +124,11 @@ def get_signal():
 # ================= VALIDACIÓN =================
 def validate_trade(side, entry, stop, qty):
 
-    if entry is None or stop is None:
+    if not is_valid_number(entry) or not is_valid_number(stop):
         return False
 
     mark = get_mark_price()
-    if mark is None:
+    if not is_valid_number(mark):
         return False
 
     if side == "LONG" and stop >= mark:
@@ -144,18 +159,20 @@ def open_trade():
 
     side,entry,stop = get_signal()
 
-    # 🔥 VALIDACIÓN CRÍTICA
-    if side is None or entry is None or stop is None:
+    if side is None:
+        return
+
+    if not is_valid_number(entry) or not is_valid_number(stop):
         return
 
     risk = abs(entry - stop)
-    if risk == 0:
+    if not is_valid_number(risk) or risk == 0:
         return
 
     qty = RISK_USDT / risk
     qty = format_qty(qty)
 
-    if qty <= 0:
+    if not is_valid_number(qty) or qty <= 0:
         return
 
     if not validate_trade(side, entry, stop, qty):
