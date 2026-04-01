@@ -1,175 +1,209 @@
-from binance.client import Client
-import pandas as pd
-import ta
 import time
-import os
-import requests
 import math
+import requests
+import numpy as np
+import pandas as pd
+from binance.client import Client
+from binance.enums import *
 
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
+# ===== CONFIG =====
+API_KEY = "TU_API_KEY"
+API_SECRET = "TU_API_SECRET"
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+    "MATICUSDT",
+    "LINKUSDT"
+]
+TIMEFRAME = "15m"
+LEVERAGE = 5
+RISK_USDT = 1
+
+EMA_FAST = 50
+EMA_SLOW = 200
+RSI_PERIOD = 14
+ATR_PERIOD = 14
+
+ATR_MIN = 0.0005  # filtro de mercado muerto
 
 client = Client(API_KEY, API_SECRET)
 
-symbol = "XRPUSDT"
-interval = Client.KLINE_INTERVAL_15MINUTE
+# ===== TELEGRAM =====
+TELEGRAM_TOKEN = "TU_TOKEN"
+CHAT_ID = "TU_CHAT_ID"
 
-RISK_USDT = 1
-MIN_SL_PERCENT = 0.003
-MIN_NOTIONAL = 5
-
-last_error = None
-
-# ================= TELEGRAM =================
-def send_msg(text):
+def send(msg):
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      data={"chat_id": CHAT_ID, "text": text})
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
     except:
         pass
 
-# ================= SAFE =================
-def safe(x):
-    try:
-        if x is None:
-            return None
-        if isinstance(x, float) and math.isnan(x):
-            return None
-        return float(x)
-    except:
-        return None
+# ===== DATA =====
+def get_klines():
+    klines = client.futures_klines(symbol=SYMBOL, interval=TIMEFRAME, limit=300)
+    df = pd.DataFrame(klines, columns=[
+        "time","open","high","low","close","volume",
+        "_","_","_","_","_","_"
+    ])
+    df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    return df
 
-def safe_abs(x):
-    x = safe(x)
-    if x is None:
-        return None
-    try:
-        return abs(x)
-    except:
-        return None
+# ===== INDICADORES =====
+def calculate_indicators(df):
+    df["ema50"] = df["close"].ewm(span=EMA_FAST).mean()
+    df["ema200"] = df["close"].ewm(span=EMA_SLOW).mean()
 
-# ================= DATA =================
-def get_data():
-    try:
-        k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
-        df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
+    # RSI
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(RSI_PERIOD).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(RSI_PERIOD).mean()
 
-        df["c"] = pd.to_numeric(df["c"], errors='coerce')
-        df["l"] = pd.to_numeric(df["l"], errors='coerce')
-        df["h"] = pd.to_numeric(df["h"], errors='coerce')
+    rs = gain / loss
+    df["rsi"] = 100 - (100 / (1 + rs))
 
-        df = df.dropna()
+    # ATR
+    df["tr"] = np.maximum(df["high"] - df["low"],
+              np.maximum(abs(df["high"] - df["close"].shift()),
+                         abs(df["low"] - df["close"].shift())))
+    df["atr"] = df["tr"].rolling(ATR_PERIOD).mean()
 
-        if len(df) < 200:
-            return None
+    return df
 
-        return df
+# ===== VALIDACIÓN SEGURA =====
+def safe(val):
+    return val is not None and not (isinstance(val, float) and math.isnan(val))
 
-    except:
-        return None
-
-# ================= SEÑAL =================
-def get_signal():
-    df = get_data()
-    if df is None:
-        return None, None, None
-
-    try:
-        df["ema50"] = ta.trend.ema_indicator(df["c"], 50)
-        df["ema200"] = ta.trend.ema_indicator(df["c"], 200)
-        df["rsi"] = ta.momentum.rsi(df["c"], 14)
-
-        df = df.dropna()
-
-        last = df.iloc[-1]
-
-        price = safe(last["c"])
-        rsi = safe(last["rsi"])
-        ema50 = safe(last["ema50"])
-        ema200 = safe(last["ema200"])
-
-        if None in (price, rsi, ema50, ema200):
-            return None, None, None
-
-        # LONG
-        if ema50 > ema200 * 0.998 and 30 < rsi < 65:
-            stop = safe(df["l"].tail(5).min())
-            dist = safe_abs(price - stop)
-
-            if stop and dist and dist / price > MIN_SL_PERCENT:
-                return "LONG", price, stop
-
-        # SHORT
-        if ema50 < ema200 * 1.002 and 35 < rsi < 70:
-            stop = safe(df["h"].tail(5).max())
-            dist = safe_abs(price - stop)
-
-            if stop and dist and dist / price > MIN_SL_PERCENT:
-                return "SHORT", price, stop
-
-        return None, None, None
-
-    except:
-        return None, None, None
-
-# ================= POS =================
+# ===== POSICIÓN =====
 def get_position():
+    positions = client.futures_position_information(symbol=SYMBOL)
+    for p in positions:
+        amt = float(p["positionAmt"])
+        if amt != 0:
+            return amt
+    return 0
+
+# ===== TAMAÑO =====
+def calc_qty(price):
+    qty = (RISK_USDT * LEVERAGE) / price
+    return round(qty, 1)
+
+# ===== ORDEN =====
+def open_trade(side, price, atr):
+    qty = calc_qty(price)
+
+    if qty <= 0:
+        print("❌ Qty inválido")
+        return
+
     try:
-        for p in client.futures_position_information(symbol=symbol):
-            return float(p["positionAmt"])
-    except:
-        return 0.0
-
-# ================= TRADE =================
-def open_trade():
-    try:
-        side, entry, stop = get_signal()
-
-        if side is None:
-            return
-
-        entry = safe(entry)
-        stop = safe(stop)
-
-        if entry is None or stop is None:
-            return
-
-        risk = safe_abs(entry - stop)
-        if risk is None or risk == 0:
-            return
-
-        qty = safe(RISK_USDT / risk)
-        if qty is None:
-            return
-
-        if qty * entry < MIN_NOTIONAL:
-            return
-
-        if safe_abs(get_position()) > 0:
-            return
-
-        order_side = "BUY" if side == "LONG" else "SELL"
-
-        client.futures_create_order(
-            symbol=symbol,
-            side=order_side,
-            type="MARKET",
+        order = client.futures_create_order(
+            symbol=SYMBOL,
+            side=SIDE_BUY if side == "LONG" else SIDE_SELL,
+            type=ORDER_TYPE_MARKET,
             quantity=qty
         )
 
-        send_msg(f"🚀 {side} XRP")
+        # SL/TP con ATR
+        sl_distance = atr * 1.2
+        tp_distance = atr * 2
+
+        if side == "LONG":
+            sl = price - sl_distance
+            tp = price + tp_distance
+        else:
+            sl = price + sl_distance
+            tp = price - tp_distance
+
+        # STOP LOSS
+        client.futures_create_order(
+            symbol=SYMBOL,
+            side=SIDE_SELL if side == "LONG" else SIDE_BUY,
+            type=FUTURE_ORDER_TYPE_STOP_MARKET,
+            stopPrice=round(sl, 4),
+            closePosition=True
+        )
+
+        # TAKE PROFIT
+        client.futures_create_order(
+            symbol=SYMBOL,
+            side=SIDE_SELL if side == "LONG" else SIDE_BUY,
+            type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+            stopPrice=round(tp, 4),
+            closePosition=True
+        )
+
+        msg = f"{side} {SYMBOL}\nQty: {qty}\nSL: {round(sl,4)}\nTP: {round(tp,4)}"
+        print(msg)
+        send(msg)
 
     except Exception as e:
-        global last_error
-        err = str(e)
-        if err != last_error:
-            send_msg(f"❌ {err}")
-            last_error = err
+        print(f"❌ Error orden: {e}")
 
-# ================= LOOP =================
-while True:
-    open_trade()
-    time.sleep(120)
+# ===== LÓGICA =====
+def check_signal(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    if not all(map(safe, [
+        last["ema50"], last["ema200"], last["rsi"], last["atr"]
+    ])):
+        return None
+
+    # FILTRO ATR
+    if last["atr"] < ATR_MIN:
+        print("⏸ Mercado sin movimiento")
+        return None
+
+    price = last["close"]
+
+    # ===== LONG =====
+    if last["ema50"] > last["ema200"]:
+        if price > last["ema50"] and prev["close"] <= prev["ema50"]:
+            if last["rsi"] > 45:
+                print("✅ LONG válido")
+                return "LONG"
+
+    # ===== SHORT =====
+    if last["ema50"] < last["ema200"]:
+        if price < last["ema50"] and prev["close"] >= prev["ema50"]:
+            if last["rsi"] < 55:
+                print("✅ SHORT válido")
+                return "SHORT"
+
+    return None
+
+# ===== LOOP =====
+def run():
+    print("🚀 BOT FASE 3 ACTIVO")
+
+    while True:
+        try:
+            df = get_klines()
+            df = calculate_indicators(df)
+
+            signal = check_signal(df)
+
+            if signal and get_position() == 0:
+                price = df.iloc[-1]["close"]
+                atr = df.iloc[-1]["atr"]
+
+                open_trade(signal, price, atr)
+
+            time.sleep(30)
+
+        except Exception as e:
+            print(f"❌ Error loop: {e}")
+            time.sleep(10)
+
+# ===== START =====
+if __name__ == "__main__":
+    run()
