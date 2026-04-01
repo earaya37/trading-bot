@@ -23,8 +23,6 @@ MIN_SL_PERCENT = 0.006
 MIN_NOTIONAL = 5
 
 last_error = None
-error_count = 0
-MAX_ERRORS = 5
 
 # ================= TELEGRAM =================
 def send_msg(text):
@@ -34,43 +32,32 @@ def send_msg(text):
     except:
         pass
 
-# ================= HELPERS =================
-def is_valid(x):
-    return x is not None and not (isinstance(x, float) and math.isnan(x))
-
-# ================= MARKET =================
-def get_mark_price():
+# ================= VALIDADOR =================
+def safe_number(x):
     try:
-        return float(client.futures_mark_price(symbol=symbol)["markPrice"])
+        if x is None:
+            return None
+        if isinstance(x, float) and math.isnan(x):
+            return None
+        return float(x)
     except:
         return None
-
-# ================= POSICIÓN =================
-def get_position_amt():
-    try:
-        for p in client.futures_position_information(symbol=symbol):
-            return float(p["positionAmt"])
-    except:
-        return 0.0
-
-# ================= FORMAT =================
-info = client.futures_exchange_info()
-filters = next(s for s in info["symbols"] if s["symbol"] == symbol)["filters"]
-
-step = float(next(f for f in filters if f["filterType"]=="LOT_SIZE")["stepSize"])
-tick = float(next(f for f in filters if f["filterType"]=="PRICE_FILTER")["tickSize"])
-
-def format_qty(q):
-    return math.floor(q / step) * step
 
 # ================= DATA =================
 def get_data():
     try:
         k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
         df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
-        df["c"] = df["c"].astype(float)
-        df["l"] = df["l"].astype(float)
-        df["h"] = df["h"].astype(float)
+        df["c"] = pd.to_numeric(df["c"], errors='coerce')
+        df["l"] = pd.to_numeric(df["l"], errors='coerce')
+        df["h"] = pd.to_numeric(df["h"], errors='coerce')
+
+        # 🔥 eliminar basura
+        df = df.dropna()
+
+        if len(df) < 200:
+            return None
+
         return df
     except:
         return None
@@ -78,91 +65,117 @@ def get_data():
 # ================= SEÑAL =================
 def get_signal():
     df = get_data()
-
-    if df is None or len(df) < 200:
+    if df is None:
         return None,None,None
 
-    df["ema50"] = ta.trend.ema_indicator(df["c"],50)
-    df["ema200"] = ta.trend.ema_indicator(df["c"],200)
-    df["rsi"] = ta.momentum.rsi(df["c"],14)
+    try:
+        df["ema50"] = ta.trend.ema_indicator(df["c"],50)
+        df["ema200"] = ta.trend.ema_indicator(df["c"],200)
+        df["rsi"] = ta.momentum.rsi(df["c"],14)
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+        df = df.dropna()
 
-    price = last["c"]
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
 
-    if not is_valid(price):
+        price = safe_number(last["c"])
+
+        if price is None:
+            return None,None,None
+
+        # LONG
+        if last["ema50"] > last["ema200"] and 40 < last["rsi"] < 55 and last["rsi"] > prev["rsi"]:
+            stop = safe_number(df["l"].tail(5).min())
+
+            if stop is None:
+                return None,None,None
+
+            if abs(price - stop) / price < MIN_SL_PERCENT:
+                return None,None,None
+
+            return "LONG", price, stop
+
+        # SHORT
+        if last["ema50"] < last["ema200"] and 45 < last["rsi"] < 60 and last["rsi"] < prev["rsi"]:
+            stop = safe_number(df["h"].tail(5).max())
+
+            if stop is None:
+                return None,None,None
+
+            if abs(price - stop) / price < MIN_SL_PERCENT:
+                return None,None,None
+
+            return "SHORT", price, stop
+
         return None,None,None
 
-    if last["ema50"] > last["ema200"] and 40 < last["rsi"] < 55 and last["rsi"] > prev["rsi"]:
-        stop = df["l"].tail(5).min()
-        if not is_valid(stop):
-            return None,None,None
-        if abs(price-stop)/price < MIN_SL_PERCENT:
-            return None,None,None
-        return "LONG",price,stop
-
-    if last["ema50"] < last["ema200"] and 45 < last["rsi"] < 60 and last["rsi"] < prev["rsi"]:
-        stop = df["h"].tail(5).max()
-        if not is_valid(stop):
-            return None,None,None
-        if abs(price-stop)/price < MIN_SL_PERCENT:
-            return None,None,None
-        return "SHORT",price,stop
-
-    return None,None,None
+    except:
+        return None,None,None
 
 # ================= TRADE =================
 def open_trade():
-    side,entry,stop = get_signal()
 
-    if side is None or not is_valid(entry) or not is_valid(stop):
-        return
+    try:
+        side, entry, stop = get_signal()
 
-    risk = abs(entry - stop)
-    if not is_valid(risk) or risk == 0:
-        return
+        if side is None:
+            return
 
-    qty = RISK_USDT / risk
-    qty = format_qty(qty)
+        entry = safe_number(entry)
+        stop = safe_number(stop)
 
-    if qty <= 0:
-        return
+        if entry is None or stop is None:
+            return
 
-    if qty * entry < MIN_NOTIONAL:
-        return
+        # 🔥 CALCULO SEGURO
+        risk = safe_number(entry - stop)
+        if risk is None or risk == 0:
+            return
 
-    if abs(get_position_amt()) > 0:
-        return
+        risk = abs(risk)
 
-    order_side = "BUY" if side=="LONG" else "SELL"
+        qty = safe_number(RISK_USDT / risk)
+        if qty is None:
+            return
 
-    client.futures_create_order(
-        symbol=symbol,
-        side=order_side,
-        type="MARKET",
-        quantity=qty
-    )
+        # filtro mínimo
+        if qty * entry < MIN_NOTIONAL:
+            return
 
-    send_msg(f"✅ TRADE LIMPIO {side}")
+        # evitar duplicados
+        pos = safe_number(get_position())
+        if pos is not None and abs(pos) > 0:
+            return
+
+        order_side = "BUY" if side == "LONG" else "SELL"
+
+        client.futures_create_order(
+            symbol=symbol,
+            side=order_side,
+            type="MARKET",
+            quantity=qty
+        )
+
+        send_msg(f"✅ TRADE LIMPIO {side}")
+
+    except Exception as e:
+        global last_error
+        err = str(e)
+
+        # evitar spam
+        if err != last_error:
+            send_msg(f"❌ {err}")
+            last_error = err
+
+# ================= POSICIÓN =================
+def get_position():
+    try:
+        for p in client.futures_position_information(symbol=symbol):
+            return float(p["positionAmt"])
+    except:
+        return 0.0
 
 # ================= LOOP =================
 while True:
-    try:
-        open_trade()
-        time.sleep(120)
-
-    except Exception as e:
-        error = str(e)
-
-        # evitar spam
-        if error != last_error:
-            send_msg(f"❌ {error}")
-
-        error_count += 1
-
-        if error_count >= MAX_ERRORS:
-            send_msg("🛑 BOT DETENIDO POR ERRORES")
-            break
-
-        time.sleep(60)
+    open_trade()
+    time.sleep(120)
