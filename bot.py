@@ -24,9 +24,8 @@ RISK_USDT = 1
 MAX_TRADES = 1
 COOLDOWN_MINUTES = 15
 BLOCK_TIME = 10
-
-MIN_SL_PERCENT = 0.004
 MAX_DAILY_LOSS = 3
+MIN_SL_PERCENT = 0.004
 
 last_trade_time = {}
 blocked_symbols = {}
@@ -41,18 +40,14 @@ def send_msg(text):
     except:
         pass
 
-# ================= BALANCE =================
-def get_balance():
-    for b in client.futures_account_balance():
-        if b["asset"] == "USDT":
-            return float(b["balance"])
-    return 0
-
 # ================= POSICIÓN =================
 def get_position_amt(symbol):
-    for p in client.futures_position_information(symbol=symbol):
-        if p["symbol"] == symbol:
-            return float(p["positionAmt"])
+    try:
+        for p in client.futures_position_information(symbol=symbol):
+            if p["symbol"] == symbol:
+                return float(p["positionAmt"])
+    except:
+        return 0.0
     return 0.0
 
 def get_open_positions_count():
@@ -92,16 +87,21 @@ def format_price(symbol, price):
 
 # ================= DATA =================
 def get_data(symbol):
-    k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
-    df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
-    df["c"] = df["c"].astype(float)
-    df["l"] = df["l"].astype(float)
-    df["h"] = df["h"].astype(float)
-    return df
+    try:
+        k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
+        df = pd.DataFrame(k, columns=["t","o","h","l","c","v","ct","q","n","tb","tq","i"])
+        df["c"] = df["c"].astype(float)
+        df["l"] = df["l"].astype(float)
+        df["h"] = df["h"].astype(float)
+        return df
+    except:
+        return None
 
 # ================= SEÑAL =================
 def get_signal(symbol):
     df = get_data(symbol)
+    if df is None or len(df) < 200:
+        return None,None,None
 
     df["ema50"] = ta.trend.ema_indicator(df["c"],50)
     df["ema200"] = ta.trend.ema_indicator(df["c"],200)
@@ -127,15 +127,22 @@ def get_signal(symbol):
     return None,None,None
 
 # ================= SLTP =================
-def place_sl_tp(symbol, side, qty, stop, tp):
+def place_sl_tp(symbol, side, stop, tp):
+
     try:
+        real_qty = abs(get_position_amt(symbol))
+        if real_qty == 0:
+            return False
+
+        # SL primero
         client.futures_create_order(
             symbol=symbol,
             side=side,
             type="STOP_MARKET",
             stopPrice=stop,
-            quantity=qty,
-            reduceOnly=True
+            quantity=real_qty,
+            reduceOnly=True,
+            workingType="MARK_PRICE"
         )
 
         time.sleep(1)
@@ -144,16 +151,19 @@ def place_sl_tp(symbol, side, qty, stop, tp):
         if len(orders) == 0:
             return False
 
+        # TP
         client.futures_create_order(
             symbol=symbol,
             side=side,
             type="TAKE_PROFIT_MARKET",
             stopPrice=tp,
-            quantity=qty,
-            reduceOnly=True
+            quantity=real_qty,
+            reduceOnly=True,
+            workingType="MARK_PRICE"
         )
 
         return True
+
     except Exception as e:
         print("SLTP ERROR:", e)
         return False
@@ -191,8 +201,8 @@ def open_trade():
 
         risk = abs(entry - stop)
         qty = RISK_USDT / risk
-
         qty = format_qty(symbol, qty)
+
         if qty <= 0:
             continue
 
@@ -201,24 +211,34 @@ def open_trade():
 
         client.futures_create_order(symbol=symbol, side=order_side, type="MARKET", quantity=qty)
 
-        # confirmar posición
+        # esperar posición REAL
         confirmed = False
-        for _ in range(5):
-            if abs(get_position_amt(symbol)) > 0:
+        for _ in range(10):
+            real_qty = abs(get_position_amt(symbol))
+            if real_qty > 0:
                 confirmed = True
                 break
-            time.sleep(1)
+            time.sleep(0.5)
 
         if not confirmed:
             blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
             continue
 
-        stop = format_price(symbol, stop)
-        tp = format_price(symbol, entry + (entry-stop)*2 if side=="LONG" else entry-(stop-entry)*2)
+        # ajustar SL (buffer anti rechazo)
+        if side == "LONG":
+            stop *= 0.999
+            tp = entry + (entry - stop) * 2
+        else:
+            stop *= 1.001
+            tp = entry - (stop - entry) * 2
 
-        if not place_sl_tp(symbol, sl_side, qty, stop, tp):
+        stop = format_price(symbol, stop)
+        tp = format_price(symbol, tp)
+
+        if not place_sl_tp(symbol, sl_side, stop, tp):
             send_msg(f"❌ SL FALLÓ {symbol}")
-            client.futures_create_order(symbol=symbol, side=sl_side, type="MARKET", quantity=qty)
+            real_qty = abs(get_position_amt(symbol))
+            client.futures_create_order(symbol=symbol, side=sl_side, type="MARKET", quantity=real_qty)
             blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
             daily_loss += 1
             return
