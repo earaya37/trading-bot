@@ -24,17 +24,15 @@ LEVERAGE = 5
 RISK_PERCENT = 0.10
 MIN_NOTIONAL = 15
 MAX_TRADES = 3
+MAX_NOTIONAL_PER_TRADE = 120  # 🔥 límite para no sobreapalancarte
 
-# 🔥 TRACKING
 last_positions = {}
 trade_data = {}
 
 daily_profit = 0
 wins = 0
 losses = 0
-last_day = datetime.now().day
 
-# 📩 TELEGRAM
 def send_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -42,7 +40,6 @@ def send_msg(text):
     except:
         pass
 
-# 💰 BALANCE
 def get_balance():
     try:
         balance = client.futures_account_balance()
@@ -51,6 +48,17 @@ def get_balance():
                 return float(b["balance"])
     except:
         return 0
+
+# 🔥 CONFIGURAR ISOLATED + LEVERAGE
+def set_margin(symbol):
+    try:
+        client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
+    except:
+        pass
+    try:
+        client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+    except:
+        pass
 
 # 🔍 PRECISION
 exchange_info = client.futures_exchange_info()
@@ -76,20 +84,17 @@ def format_qty(symbol, qty):
     step = symbol_info[symbol]["stepSize"]
     decimals = symbol_info[symbol]["qtyDecimals"]
     qty = math.floor(qty / step) * step
-    return f"{qty:.{decimals}f}"
+    return float(f"{qty:.{decimals}f}")
 
 def format_price(symbol, price):
     tick = symbol_info[symbol]["tickSize"]
     decimals = symbol_info[symbol]["priceDecimals"]
     price = math.floor(price / tick) * tick
-    return f"{price:.{decimals}f}"
+    return float(f"{price:.{decimals}f}")
 
-# 🔒 POSICIONES
 def get_position_amt(symbol):
     try:
         pos = client.futures_position_information(symbol=symbol)
-        if not pos:
-            return 0.0
         for p in pos:
             if p["symbol"] == symbol:
                 return float(p["positionAmt"])
@@ -100,7 +105,6 @@ def get_position_amt(symbol):
 def get_open_positions_count():
     return sum(1 for s in symbols if abs(get_position_amt(s)) > 0)
 
-# 📈 DATA
 def get_data(symbol):
     try:
         klines = client.futures_klines(symbol=symbol, interval=interval, limit=200)
@@ -115,7 +119,6 @@ def get_data(symbol):
     except:
         return None
 
-# 🧠 SEÑAL
 def get_signal(symbol):
     df = get_data(symbol)
 
@@ -137,19 +140,14 @@ def get_signal(symbol):
 
     if ema50 > ema200 and 35 < rsi < 50 and rsi > prev_rsi:
         stop = df["low"].tail(5).min()
-        if abs(price - stop)/price < 0.004:
-            return None, None, None, None
         return "LONG", price, stop, rsi
 
     if ema50 < ema200 and 50 < rsi < 65 and rsi < prev_rsi:
         stop = df["high"].tail(5).max()
-        if abs(price - stop)/price < 0.004:
-            return None, None, None, None
         return "SHORT", price, stop, rsi
 
     return None, None, None, None
 
-# 🚀 ORDEN
 def safe_order(symbol, side, qty):
     try:
         client.futures_create_order(
@@ -163,60 +161,6 @@ def safe_order(symbol, side, qty):
     except:
         return False
 
-# 🔔 GESTIÓN + TRACKING
-def manage_positions():
-    global last_positions, trade_data, daily_profit, wins, losses
-
-    for symbol in symbols:
-        amt = get_position_amt(symbol)
-
-        if symbol in last_positions:
-            if last_positions[symbol] != 0 and amt == 0:
-
-                if symbol in trade_data:
-                    data = trade_data[symbol]
-
-                    price = float(get_data(symbol)["close"].iloc[-1])
-
-                    if data["side"] == "LONG":
-                        profit = price - data["entry"]
-                    else:
-                        profit = data["entry"] - price
-
-                    profit_usdt = round(profit * data["qty"], 2)
-
-                    daily_profit += profit_usdt
-
-                    if profit_usdt > 0:
-                        wins += 1
-                    else:
-                        losses += 1
-
-                    send_msg(f"""📊 TRADE CERRADO {symbol}
-
-💰 Resultado: {profit_usdt} USDT
-""")
-
-                    del trade_data[symbol]
-
-        last_positions[symbol] = amt
-
-# 📊 REPORTE DIARIO
-def daily_report():
-    global daily_profit, wins, losses
-
-    result = "📈 GANANCIA" if daily_profit > 0 else "📉 PÉRDIDA"
-
-    send_msg(f"""📊 REPORTE DEL DÍA
-
-{result}
-
-💰 Total: {round(daily_profit,2)} USDT
-✅ Ganadas: {wins}
-❌ Perdidas: {losses}
-""")
-
-# 🚀 TRADE
 def open_trade():
     if get_open_positions_count() >= MAX_TRADES:
         return
@@ -236,22 +180,35 @@ def open_trade():
         if side is None:
             continue
 
-        risk_usdt = max(balance * RISK_PERCENT, MIN_NOTIONAL)
-        qty = format_qty(symbol, risk_usdt / entry)
+        set_margin(symbol)  # 🔥 CLAVE
 
-        if float(qty) <= 0:
+        risk_usdt = balance * RISK_PERCENT
+        risk_per_unit = abs(entry - stop)
+
+        if risk_per_unit == 0:
+            continue
+
+        qty = risk_usdt / risk_per_unit
+
+        notional = qty * entry
+
+        # 🔥 limitar tamaño máximo
+        if notional > MAX_NOTIONAL_PER_TRADE:
+            qty = MAX_NOTIONAL_PER_TRADE / entry
+
+        qty = format_qty(symbol, qty)
+
+        if qty <= 0:
             continue
 
         if side == "LONG":
             ok = safe_order(symbol, "BUY", qty)
             sl_side = "SELL"
-            risk = entry - stop
-            tp = entry + (risk * 2)
+            tp = entry + (abs(entry - stop) * 2)
         else:
             ok = safe_order(symbol, "SELL", qty)
             sl_side = "BUY"
-            risk = stop - entry
-            tp = entry - (risk * 2)
+            tp = entry - (abs(entry - stop) * 2)
 
         if not ok:
             continue
@@ -275,12 +232,6 @@ def open_trade():
             closePosition=True
         )
 
-        trade_data[symbol] = {
-            "entry": entry,
-            "qty": float(qty),
-            "side": side
-        }
-
         send_msg(f"""🚀 TRADE {side}
 Par: {symbol}
 
@@ -288,30 +239,17 @@ Par: {symbol}
 🛑 SL: {stop}
 🎯 TP: {tp}
 📦 Qty: {qty}
+💵 Notional: {round(qty*entry,2)}
 
 📊 RSI: {round(rsi,2)}
 """)
 
         return
 
-# 🔁 LOOP
 while True:
     try:
-        now = datetime.now()
-
-        manage_positions()
         open_trade()
-
-        # 🔥 REPORTE A LAS 23:59
-        if now.hour == 23 and now.minute >= 59:
-            daily_report()
-            daily_profit = 0
-            wins = 0
-            losses = 0
-            time.sleep(60)
-
         time.sleep(120)
-
     except Exception as e:
         print(e)
         send_msg(f"❌ {e}")
