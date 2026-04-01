@@ -75,11 +75,14 @@ def safe(val):
 
 # ===== POSICIÓN =====
 def get_position(symbol):
-    positions = client.futures_position_information(symbol=symbol)
-    for p in positions:
-        amt = float(p["positionAmt"])
-        if amt != 0:
-            return amt
+    try:
+        positions = client.futures_position_information(symbol=symbol)
+        for p in positions:
+            amt = float(p["positionAmt"])
+            if amt != 0:
+                return amt
+    except:
+        return 0
     return 0
 
 # ===== TAMAÑO =====
@@ -95,6 +98,7 @@ def open_trade(symbol, side, price, atr):
         return
 
     try:
+        # MARKET ENTRY
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_BUY if side == "LONG" else SIDE_SELL,
@@ -102,9 +106,11 @@ def open_trade(symbol, side, price, atr):
             quantity=qty
         )
 
-        sl = price - atr*1.2 if side == "LONG" else price + atr*1.2
-        tp = price + atr*2 if side == "LONG" else price - atr*2
+        # SL / TP dinámico
+        sl = price - atr * 1.2 if side == "LONG" else price + atr * 1.2
+        tp = price + atr * 2 if side == "LONG" else price - atr * 2
 
+        # STOP LOSS
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_SELL if side == "LONG" else SIDE_BUY,
@@ -113,6 +119,7 @@ def open_trade(symbol, side, price, atr):
             closePosition=True
         )
 
+        # TAKE PROFIT
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_SELL if side == "LONG" else SIDE_BUY,
@@ -121,43 +128,43 @@ def open_trade(symbol, side, price, atr):
             closePosition=True
         )
 
-        msg = f"{side} {symbol}\nQty: {qty}"
+        msg = f"{side} {symbol}\nQty: {qty}\nSL: {round(sl,4)}\nTP: {round(tp,4)}"
         print(msg)
         send(msg)
 
     except Exception as e:
-        print(f"❌ {symbol} error: {e}")
+        print(f"❌ {symbol} order error: {e}")
 
-# ===== LÓGICA =====
+# ===== LÓGICA OPTIMIZADA =====
 def check_signal(df):
     last = df.iloc[-1]
-    prev = df.iloc[-2]
 
     if not all(map(safe, [
         last["ema50"], last["ema200"], last["rsi"], last["atr"]
     ])):
         return None
 
+    # FILTRO ATR
     if last["atr"] < ATR_MIN:
         return None
 
     price = last["close"]
 
+    # LONG (más flexible)
     if last["ema50"] > last["ema200"]:
-        if price > last["ema50"] and prev["close"] <= prev["ema50"]:
-            if last["rsi"] > 45:
-                return "LONG"
+        if price > last["ema50"] and last["rsi"] > 45:
+            return "LONG"
 
+    # SHORT (más flexible)
     if last["ema50"] < last["ema200"]:
-        if price < last["ema50"] and prev["close"] >= prev["ema50"]:
-            if last["rsi"] < 55:
-                return "SHORT"
+        if price < last["ema50"] and last["rsi"] < 55:
+            return "SHORT"
 
     return None
 
 # ===== LOOP =====
 def run():
-    print("🚀 MULTI-PAIR BOT ACTIVO")
+    print("🚀 BOT FASE 3 MULTIPAIR ACTIVO")
 
     while True:
         for symbol in SYMBOLS:
@@ -178,5 +185,6 @@ def run():
 
         time.sleep(30)
 
+# ===== START =====
 if __name__ == "__main__":
     run()
