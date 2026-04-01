@@ -5,7 +5,6 @@ import time
 import os
 import requests
 import math
-from datetime import datetime
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
@@ -19,20 +18,18 @@ symbol = "XRPUSDT"
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_USDT = 1
-MIN_SL_PERCENT = 0.004
+MIN_SL_PERCENT = 0.003
 MIN_NOTIONAL = 5
 
 last_error = None
 
-# ================= TELEGRAM =================
 def send_msg(text):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      data={"chat_id": CHAT_ID, "text": text})
     except:
         pass
 
-# ================= SAFE =================
 def safe(x):
     try:
         if x is None or (isinstance(x, float) and math.isnan(x)):
@@ -41,7 +38,6 @@ def safe(x):
     except:
         return None
 
-# ================= DATA =================
 def get_data():
     try:
         k = client.futures_klines(symbol=symbol, interval=interval, limit=200)
@@ -50,56 +46,45 @@ def get_data():
         df["l"] = pd.to_numeric(df["l"], errors='coerce')
         df["h"] = pd.to_numeric(df["h"], errors='coerce')
         df = df.dropna()
-        if len(df) < 200:
-            return None
-        return df
+        return df if len(df) >= 200 else None
     except:
         return None
 
-# ================= SEÑAL =================
 def get_signal():
     df = get_data()
     if df is None:
         return None,None,None
 
-    try:
-        df["ema50"] = ta.trend.ema_indicator(df["c"],50)
-        df["ema200"] = ta.trend.ema_indicator(df["c"],200)
-        df["rsi"] = ta.momentum.rsi(df["c"],14)
+    df["ema50"] = ta.trend.ema_indicator(df["c"],50)
+    df["ema200"] = ta.trend.ema_indicator(df["c"],200)
+    df["rsi"] = ta.momentum.rsi(df["c"],14)
 
-        df = df.dropna()
+    df = df.dropna()
 
-        last = df.iloc[-1]
-        price = safe(last["c"])
-        rsi = safe(last["rsi"])
+    last = df.iloc[-1]
 
-        if price is None or rsi is None:
-            return None,None,None
+    price = safe(last["c"])
+    rsi = safe(last["rsi"])
+    ema50 = safe(last["ema50"])
+    ema200 = safe(last["ema200"])
 
-        # LONG
-        if last["ema50"] > last["ema200"] and 35 < rsi < 60:
-            stop = safe(df["l"].tail(5).min())
-            if stop is None:
-                return None,None,None
-            if abs(price-stop)/price < MIN_SL_PERCENT:
-                return None,None,None
-            return "LONG",price,stop
-
-        # SHORT
-        if last["ema50"] < last["ema200"] and 40 < rsi < 65:
-            stop = safe(df["h"].tail(5).max())
-            if stop is None:
-                return None,None,None
-            if abs(price-stop)/price < MIN_SL_PERCENT:
-                return None,None,None
-            return "SHORT",price,stop
-
+    if None in (price, rsi, ema50, ema200):
         return None,None,None
 
-    except:
-        return None,None,None
+    # LONG (más flexible)
+    if ema50 > ema200 * 0.998 and 30 < rsi < 65:
+        stop = safe(df["l"].tail(5).min())
+        if stop and abs(price-stop)/price > MIN_SL_PERCENT:
+            return "LONG", price, stop
 
-# ================= POS =================
+    # SHORT (más flexible)
+    if ema50 < ema200 * 1.002 and 35 < rsi < 70:
+        stop = safe(df["h"].tail(5).max())
+        if stop and abs(price-stop)/price > MIN_SL_PERCENT:
+            return "SHORT", price, stop
+
+    return None,None,None
+
 def get_position():
     try:
         for p in client.futures_position_information(symbol=symbol):
@@ -107,17 +92,13 @@ def get_position():
     except:
         return 0.0
 
-# ================= TRADE =================
 def open_trade():
     try:
         side, entry, stop = get_signal()
-
         if side is None:
             return
 
-        entry = safe(entry)
-        stop = safe(stop)
-
+        entry, stop = safe(entry), safe(stop)
         if entry is None or stop is None:
             return
 
@@ -142,7 +123,7 @@ def open_trade():
             quantity=qty
         )
 
-        send_msg(f"🚀 TRADE {side}")
+        send_msg(f"🚀 {side} XRP")
 
     except Exception as e:
         global last_error
@@ -151,7 +132,6 @@ def open_trade():
             send_msg(f"❌ {err}")
             last_error = err
 
-# ================= LOOP =================
 while True:
     open_trade()
     time.sleep(120)
