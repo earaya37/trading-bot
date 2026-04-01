@@ -19,7 +19,7 @@ symbol = "XRPUSDT"
 interval = Client.KLINE_INTERVAL_15MINUTE
 
 RISK_USDT = 1
-MIN_SL_PERCENT = 0.006
+MIN_SL_PERCENT = 0.004
 MIN_NOTIONAL = 5
 
 last_error = None
@@ -32,12 +32,10 @@ def send_msg(text):
     except:
         pass
 
-# ================= VALIDADOR =================
-def safe_number(x):
+# ================= SAFE =================
+def safe(x):
     try:
-        if x is None:
-            return None
-        if isinstance(x, float) and math.isnan(x):
+        if x is None or (isinstance(x, float) and math.isnan(x)):
             return None
         return float(x)
     except:
@@ -51,13 +49,9 @@ def get_data():
         df["c"] = pd.to_numeric(df["c"], errors='coerce')
         df["l"] = pd.to_numeric(df["l"], errors='coerce')
         df["h"] = pd.to_numeric(df["h"], errors='coerce')
-
-        # 🔥 eliminar basura
         df = df.dropna()
-
         if len(df) < 200:
             return None
-
         return df
     except:
         return None
@@ -76,78 +70,70 @@ def get_signal():
         df = df.dropna()
 
         last = df.iloc[-1]
-        prev = df.iloc[-2]
+        price = safe(last["c"])
+        rsi = safe(last["rsi"])
 
-        price = safe_number(last["c"])
-
-        if price is None:
+        if price is None or rsi is None:
             return None,None,None
 
         # LONG
-        if last["ema50"] > last["ema200"] and 40 < last["rsi"] < 55 and last["rsi"] > prev["rsi"]:
-            stop = safe_number(df["l"].tail(5).min())
-
+        if last["ema50"] > last["ema200"] and 35 < rsi < 60:
+            stop = safe(df["l"].tail(5).min())
             if stop is None:
                 return None,None,None
-
-            if abs(price - stop) / price < MIN_SL_PERCENT:
+            if abs(price-stop)/price < MIN_SL_PERCENT:
                 return None,None,None
-
-            return "LONG", price, stop
+            return "LONG",price,stop
 
         # SHORT
-        if last["ema50"] < last["ema200"] and 45 < last["rsi"] < 60 and last["rsi"] < prev["rsi"]:
-            stop = safe_number(df["h"].tail(5).max())
-
+        if last["ema50"] < last["ema200"] and 40 < rsi < 65:
+            stop = safe(df["h"].tail(5).max())
             if stop is None:
                 return None,None,None
-
-            if abs(price - stop) / price < MIN_SL_PERCENT:
+            if abs(price-stop)/price < MIN_SL_PERCENT:
                 return None,None,None
-
-            return "SHORT", price, stop
+            return "SHORT",price,stop
 
         return None,None,None
 
     except:
         return None,None,None
 
+# ================= POS =================
+def get_position():
+    try:
+        for p in client.futures_position_information(symbol=symbol):
+            return float(p["positionAmt"])
+    except:
+        return 0.0
+
 # ================= TRADE =================
 def open_trade():
-
     try:
         side, entry, stop = get_signal()
 
         if side is None:
             return
 
-        entry = safe_number(entry)
-        stop = safe_number(stop)
+        entry = safe(entry)
+        stop = safe(stop)
 
         if entry is None or stop is None:
             return
 
-        # 🔥 CALCULO SEGURO
-        risk = safe_number(entry - stop)
-        if risk is None or risk == 0:
+        risk = abs(entry - stop)
+        if risk == 0:
             return
 
-        risk = abs(risk)
+        qty = RISK_USDT / risk
 
-        qty = safe_number(RISK_USDT / risk)
-        if qty is None:
-            return
-
-        # filtro mínimo
         if qty * entry < MIN_NOTIONAL:
             return
 
-        # evitar duplicados
-        pos = safe_number(get_position())
-        if pos is not None and abs(pos) > 0:
+        if abs(get_position()) > 0:
             return
 
-        order_side = "BUY" if side == "LONG" else "SELL"
+        order_side = "BUY" if side=="LONG" else "SELL"
 
         client.futures_create_order(
             symbol=symbol,
@@ -156,24 +142,14 @@ def open_trade():
             quantity=qty
         )
 
-        send_msg(f"✅ TRADE LIMPIO {side}")
+        send_msg(f"🚀 TRADE {side}")
 
     except Exception as e:
         global last_error
         err = str(e)
-
-        # evitar spam
         if err != last_error:
             send_msg(f"❌ {err}")
             last_error = err
-
-# ================= POSICIÓN =================
-def get_position():
-    try:
-        for p in client.futures_position_information(symbol=symbol):
-            return float(p["positionAmt"])
-    except:
-        return 0.0
 
 # ================= LOOP =================
 while True:
