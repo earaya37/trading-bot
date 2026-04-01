@@ -128,20 +128,15 @@ def get_signal(symbol):
 
 # ================= SLTP =================
 def place_sl_tp(symbol, side, stop, tp):
-
     try:
-        real_qty = abs(get_position_amt(symbol))
-        if real_qty == 0:
-            return False
 
-        # SL primero
+        # STOP LOSS (FIX DEFINITIVO)
         client.futures_create_order(
             symbol=symbol,
             side=side,
             type="STOP_MARKET",
             stopPrice=stop,
-            quantity=real_qty,
-            reduceOnly=True,
+            closePosition=True,
             workingType="MARK_PRICE"
         )
 
@@ -151,14 +146,13 @@ def place_sl_tp(symbol, side, stop, tp):
         if len(orders) == 0:
             return False
 
-        # TP
+        # TAKE PROFIT
         client.futures_create_order(
             symbol=symbol,
             side=side,
             type="TAKE_PROFIT_MARKET",
             stopPrice=tp,
-            quantity=real_qty,
-            reduceOnly=True,
+            closePosition=True,
             workingType="MARK_PRICE"
         )
 
@@ -209,13 +203,18 @@ def open_trade():
         order_side = "BUY" if side=="LONG" else "SELL"
         sl_side = "SELL" if side=="LONG" else "BUY"
 
-        client.futures_create_order(symbol=symbol, side=order_side, type="MARKET", quantity=qty)
+        # abrir posición
+        client.futures_create_order(
+            symbol=symbol,
+            side=order_side,
+            type="MARKET",
+            quantity=qty
+        )
 
-        # esperar posición REAL
+        # confirmar posición real
         confirmed = False
         for _ in range(10):
-            real_qty = abs(get_position_amt(symbol))
-            if real_qty > 0:
+            if abs(get_position_amt(symbol)) > 0:
                 confirmed = True
                 break
             time.sleep(0.5)
@@ -224,7 +223,7 @@ def open_trade():
             blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
             continue
 
-        # ajustar SL (buffer anti rechazo)
+        # buffer anti rechazo
         if side == "LONG":
             stop *= 0.999
             tp = entry + (entry - stop) * 2
@@ -238,7 +237,12 @@ def open_trade():
         if not place_sl_tp(symbol, sl_side, stop, tp):
             send_msg(f"❌ SL FALLÓ {symbol}")
             real_qty = abs(get_position_amt(symbol))
-            client.futures_create_order(symbol=symbol, side=sl_side, type="MARKET", quantity=real_qty)
+            client.futures_create_order(
+                symbol=symbol,
+                side=sl_side,
+                type="MARKET",
+                quantity=real_qty
+            )
             blocked_symbols[symbol] = datetime.now() + timedelta(minutes=BLOCK_TIME)
             daily_loss += 1
             return
