@@ -6,140 +6,73 @@ import pandas as pd
 from binance.client import Client
 from binance.enums import *
 
-# ===== CONFIG =====
 API_KEY = "TU_API_KEY"
 API_SECRET = "TU_API_SECRET"
 
-SYMBOLS = [
-    "BTCUSDT","ETHUSDT","SOLUSDT",
-    "XRPUSDT","ADAUSDT","DOGEUSDT"
-]
+SYMBOLS = ["BTCUSDT","ETHUSDT","XRPUSDT"]
 
 TIMEFRAME = "5m"
 LEVERAGE = 5
 RISK_USDT = 1
 
-EMA_FAST = 20
-EMA_SLOW = 50
-RSI_PERIOD = 14
-
 client = Client(API_KEY, API_SECRET)
 
-# ===== TELEGRAM =====
 TELEGRAM_TOKEN = "TU_TOKEN"
 CHAT_ID = "TU_CHAT_ID"
 
 def send(msg):
+    print(f"📩 TELEGRAM: {msg}")
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-    except:
-        pass
+    except Exception as e:
+        print(f"❌ Telegram error: {e}")
 
-# ===== DATA =====
 def get_klines(symbol):
-    klines = client.futures_klines(symbol=symbol, interval=TIMEFRAME, limit=150)
+    print(f"📊 Obteniendo datos {symbol}")
+    klines = client.futures_klines(symbol=symbol, interval=TIMEFRAME, limit=100)
     df = pd.DataFrame(klines, columns=[
         "time","open","high","low","close","volume",
         "_","_","_","_","_","_"
     ])
     df["close"] = df["close"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
     return df
 
-# ===== INDICADORES =====
 def calculate_indicators(df):
-    df["ema20"] = df["close"].ewm(span=EMA_FAST).mean()
-    df["ema50"] = df["close"].ewm(span=EMA_SLOW).mean()
+    df["ema20"] = df["close"].ewm(span=20).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
 
     delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(RSI_PERIOD).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(RSI_PERIOD).mean()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
     return df
 
-# ===== VALIDACIÓN =====
-def safe(val):
-    return val is not None and not (isinstance(val, float) and math.isnan(val))
-
-# ===== POSICIÓN =====
-def get_position(symbol):
-    try:
-        positions = client.futures_position_information(symbol=symbol)
-        for p in positions:
-            if float(p["positionAmt"]) != 0:
-                return True
-    except:
-        return False
-    return False
-
-# ===== TAMAÑO =====
-def calc_qty(price):
-    return round((RISK_USDT * LEVERAGE) / price, 3)
-
-# ===== ORDEN =====
-def open_trade(symbol, side, price):
-    qty = calc_qty(price)
-
-    try:
-        client.futures_create_order(
-            symbol=symbol,
-            side=SIDE_BUY if side == "LONG" else SIDE_SELL,
-            type=ORDER_TYPE_MARKET,
-            quantity=qty
-        )
-
-        sl = price * 0.997 if side == "LONG" else price * 1.003
-        tp = price * 1.004 if side == "LONG" else price * 0.996
-
-        client.futures_create_order(
-            symbol=symbol,
-            side=SIDE_SELL if side == "LONG" else SIDE_BUY,
-            type=FUTURE_ORDER_TYPE_STOP_MARKET,
-            stopPrice=round(sl, 4),
-            closePosition=True
-        )
-
-        client.futures_create_order(
-            symbol=symbol,
-            side=SIDE_SELL if side == "LONG" else SIDE_BUY,
-            type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
-            stopPrice=round(tp, 4),
-            closePosition=True
-        )
-
-        msg = f"{side} {symbol}\nQty: {qty}"
-        print(msg)
-        send(msg)
-
-    except Exception as e:
-        print(f"❌ {symbol} error: {e}")
-
-# ===== LÓGICA =====
 def check_signal(df):
     last = df.iloc[-1]
 
-    if not all(map(safe, [
-        last["ema20"], last["ema50"], last["rsi"]
-    ])):
+    print(f"🔎 Precio: {last['close']} | RSI: {last['rsi']}")
+
+    if math.isnan(last["rsi"]):
+        print("⚠️ RSI inválido")
         return None
 
-    price = last["close"]
-
-    if last["ema20"] > last["ema50"] and price > last["ema20"] and last["rsi"] > 50:
+    if last["ema20"] > last["ema50"] and last["rsi"] > 50:
+        print("🟢 Señal LONG detectada")
         return "LONG"
 
-    if last["ema20"] < last["ema50"] and price < last["ema20"] and last["rsi"] < 50:
+    if last["ema20"] < last["ema50"] and last["rsi"] < 50:
+        print("🔴 Señal SHORT detectada")
         return "SHORT"
 
+    print("⏸ Sin señal")
     return None
 
-# ===== LOOP =====
 def run():
-    print("🚀 SCALPING BOT ACTIVO (ESTE SÍ OPERA)")
+    print("🚀 BOT DEBUG ACTIVO")
+    send("🤖 Bot iniciado correctamente")
 
     while True:
         for symbol in SYMBOLS:
@@ -149,14 +82,13 @@ def run():
 
                 signal = check_signal(df)
 
-                if signal and not get_position(symbol):
-                    price = df.iloc[-1]["close"]
-                    open_trade(symbol, signal, price)
+                if signal:
+                    send(f"🔥 {signal} {symbol}")
 
             except Exception as e:
-                print(f"❌ {symbol}: {e}")
+                print(f"❌ ERROR {symbol}: {e}")
 
-        time.sleep(15)
+        time.sleep(10)
 
 if __name__ == "__main__":
     run()
