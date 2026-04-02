@@ -6,7 +6,11 @@ API_SECRET = "TU_API_SECRET"
 client = Client(API_KEY, API_SECRET)
 
 try:
+    print("SPOT TEST:")
+    print(client.get_account())
+
+    print("\nFUTURES TEST:")
     print(client.futures_account_balance())
-    print("✅ API FUNCIONANDO")
+
 except Exception as e:
-    print("❌ ERROR:", e)
+    print("ERROR:", e)
