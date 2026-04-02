@@ -12,17 +12,16 @@ API_SECRET = "TU_API_SECRET"
 
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT",
-    "XRPUSDT","ADAUSDT","DOGEUSDT",
-    "AVAXUSDT","MATICUSDT","LINKUSDT"
+    "XRPUSDT","ADAUSDT","DOGEUSDT"
 ]
 
-TIMEFRAME = "15m"
+TIMEFRAME = "5m"
 LEVERAGE = 5
 RISK_USDT = 1
 
-LOOKBACK = 20
-ATR_PERIOD = 14
-ATR_MIN = 0.0002
+EMA_FAST = 20
+EMA_SLOW = 50
+RSI_PERIOD = 14
 
 client = Client(API_KEY, API_SECRET)
 
@@ -39,7 +38,7 @@ def send(msg):
 
 # ===== DATA =====
 def get_klines(symbol):
-    klines = client.futures_klines(symbol=symbol, interval=TIMEFRAME, limit=200)
+    klines = client.futures_klines(symbol=symbol, interval=TIMEFRAME, limit=150)
     df = pd.DataFrame(klines, columns=[
         "time","open","high","low","close","volume",
         "_","_","_","_","_","_"
@@ -47,20 +46,18 @@ def get_klines(symbol):
     df["close"] = df["close"].astype(float)
     df["high"] = df["high"].astype(float)
     df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)
     return df
 
 # ===== INDICADORES =====
 def calculate_indicators(df):
-    df["max_high"] = df["high"].rolling(LOOKBACK).max()
-    df["min_low"] = df["low"].rolling(LOOKBACK).min()
+    df["ema20"] = df["close"].ewm(span=EMA_FAST).mean()
+    df["ema50"] = df["close"].ewm(span=EMA_SLOW).mean()
 
-    df["vol_avg"] = df["volume"].rolling(20).mean()
-
-    df["tr"] = np.maximum(df["high"] - df["low"],
-              np.maximum(abs(df["high"] - df["close"].shift()),
-                         abs(df["low"] - df["close"].shift())))
-    df["atr"] = df["tr"].rolling(ATR_PERIOD).mean()
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(RSI_PERIOD).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(RSI_PERIOD).mean()
+    rs = gain / loss
+    df["rsi"] = 100 - (100 / (1 + rs))
 
     return df
 
@@ -73,19 +70,18 @@ def get_position(symbol):
     try:
         positions = client.futures_position_information(symbol=symbol)
         for p in positions:
-            amt = float(p["positionAmt"])
-            if amt != 0:
-                return amt
+            if float(p["positionAmt"]) != 0:
+                return True
     except:
-        return 0
-    return 0
+        return False
+    return False
 
 # ===== TAMAÑO =====
 def calc_qty(price):
     return round((RISK_USDT * LEVERAGE) / price, 3)
 
 # ===== ORDEN =====
-def open_trade(symbol, side, price, atr):
+def open_trade(symbol, side, price):
     qty = calc_qty(price)
 
     try:
@@ -96,8 +92,8 @@ def open_trade(symbol, side, price, atr):
             quantity=qty
         )
 
-        sl = price - atr if side == "LONG" else price + atr
-        tp = price + atr*2 if side == "LONG" else price - atr*2
+        sl = price * 0.997 if side == "LONG" else price * 1.003
+        tp = price * 1.004 if side == "LONG" else price * 0.996
 
         client.futures_create_order(
             symbol=symbol,
@@ -120,36 +116,30 @@ def open_trade(symbol, side, price, atr):
         send(msg)
 
     except Exception as e:
-        print(f"❌ {symbol} order error: {e}")
+        print(f"❌ {symbol} error: {e}")
 
-# ===== LÓGICA BREAKOUT =====
+# ===== LÓGICA =====
 def check_signal(df):
     last = df.iloc[-1]
-    prev = df.iloc[-2]
 
     if not all(map(safe, [
-        last["max_high"], last["min_low"], last["atr"], last["vol_avg"]
+        last["ema20"], last["ema50"], last["rsi"]
     ])):
         return None
 
-    if last["atr"] < ATR_MIN:
-        return None
+    price = last["close"]
 
-    # LONG breakout
-    if last["close"] > prev["max_high"]:
-        if last["volume"] > last["vol_avg"]:
-            return "LONG"
+    if last["ema20"] > last["ema50"] and price > last["ema20"] and last["rsi"] > 50:
+        return "LONG"
 
-    # SHORT breakout
-    if last["close"] < prev["min_low"]:
-        if last["volume"] > last["vol_avg"]:
-            return "SHORT"
+    if last["ema20"] < last["ema50"] and price < last["ema20"] and last["rsi"] < 50:
+        return "SHORT"
 
     return None
 
 # ===== LOOP =====
 def run():
-    print("🚀 BREAKOUT BOT ACTIVO")
+    print("🚀 SCALPING BOT ACTIVO (ESTE SÍ OPERA)")
 
     while True:
         for symbol in SYMBOLS:
@@ -159,16 +149,14 @@ def run():
 
                 signal = check_signal(df)
 
-                if signal and get_position(symbol) == 0:
+                if signal and not get_position(symbol):
                     price = df.iloc[-1]["close"]
-                    atr = df.iloc[-1]["atr"]
-
-                    open_trade(symbol, signal, price, atr)
+                    open_trade(symbol, signal, price)
 
             except Exception as e:
-                print(f"❌ {symbol} loop error: {e}")
+                print(f"❌ {symbol}: {e}")
 
-        time.sleep(20)
+        time.sleep(15)
 
 if __name__ == "__main__":
     run()
