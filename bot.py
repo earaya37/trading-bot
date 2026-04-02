@@ -1,26 +1,14 @@
 import time
 import math
-import os
 import requests
 import numpy as np
 import pandas as pd
 from binance.client import Client
 from binance.enums import *
 
-# ===== ENV VARIABLES (RAILWAY) =====
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-# Limpieza extra por seguridad
-if API_KEY:
-    API_KEY = API_KEY.strip()
-if API_SECRET:
-    API_SECRET = API_SECRET.strip()
-
 # ===== CONFIG =====
+API_KEY = "4j8dMbSNzJUdYecnZhsPAyqV5TYdZycvmd9RSNPBuUdzMyC8LkhD4n3Zg3enEHxD".strip()
+API_SECRET = "9DSGmVB5kvIYDvngB9X16BO62ASQwozngCTroDP2eEBA6ie7IVn8354kItF7wEEJ".strip()
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT",
     "XRPUSDT","ADAUSDT","DOGEUSDT"
@@ -28,35 +16,24 @@ SYMBOLS = [
 
 TIMEFRAME = "5m"
 LEVERAGE = 5
-RISK_USDT = 1
+
+RISK_PER_TRADE = 1  # 🔥 riesgo REAL en USDT
 
 EMA_FAST = 20
 EMA_SLOW = 50
 RSI_PERIOD = 14
+ATR_PERIOD = 14
 
 client = Client(API_KEY, API_SECRET)
 
-# ===== TELEGRAM =====
-def send(msg):
-    print(f"📩 {msg}")
-    try:
-        if TELEGRAM_TOKEN and CHAT_ID:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-    except Exception as e:
-        print(f"⚠️ Telegram error: {e}")
-
-# ===== TEST API =====
-def test_api():
-    try:
-        print("🧪 Probando API Binance...")
-        client.futures_account_balance()
-        print("✅ API OK - Railway conectado")
-        send("🤖 Bot conectado correctamente en Railway")
-    except Exception as e:
-        print(f"❌ ERROR API: {e}")
-        send(f"❌ API ERROR: {e}")
-        exit()
+# ===== PRECISIÓN =====
+def get_precision(symbol):
+    info = client.futures_exchange_info()
+    for s in info['symbols']:
+        if s['symbol'] == symbol:
+            step = float(s['filters'][2]['stepSize'])
+            return int(round(-math.log(step, 10), 0))
+    return 3
 
 # ===== DATA =====
 def get_klines(symbol):
@@ -66,6 +43,8 @@ def get_klines(symbol):
         "_","_","_","_","_","_"
     ])
     df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
     return df
 
 # ===== INDICADORES =====
@@ -79,6 +58,12 @@ def calculate_indicators(df):
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
+    # ATR
+    df["tr"] = np.maximum(df["high"] - df["low"],
+              np.maximum(abs(df["high"] - df["close"].shift()),
+                         abs(df["low"] - df["close"].shift())))
+    df["atr"] = df["tr"].rolling(ATR_PERIOD).mean()
+
     return df
 
 # ===== POSICIÓN =====
@@ -88,17 +73,46 @@ def get_position(symbol):
         for p in positions:
             if float(p["positionAmt"]) != 0:
                 return True
-    except Exception as e:
-        print(f"❌ Error posición {symbol}: {e}")
+    except:
+        return False
     return False
 
-# ===== TAMAÑO =====
-def calc_qty(price):
-    return round((RISK_USDT * LEVERAGE) / price, 3)
+# ===== CÁLCULO PRO =====
+def calculate_trade(symbol, price, atr, side):
+    precision = get_precision(symbol)
+
+    # distancia SL (1 ATR)
+    sl_distance = atr
+
+    if sl_distance == 0:
+        return None
+
+    # qty basada en riesgo real
+    qty = RISK_PER_TRADE / sl_distance
+
+    # ajustar leverage
+    qty = qty / price * LEVERAGE
+
+    qty = round(qty, precision)
+
+    # SL y TP
+    if side == "LONG":
+        sl = price - sl_distance
+        tp = price + (sl_distance * 2)
+    else:
+        sl = price + sl_distance
+        tp = price - (sl_distance * 2)
+
+    return qty, sl, tp
 
 # ===== ORDEN =====
-def open_trade(symbol, side, price):
-    qty = calc_qty(price)
+def open_trade(symbol, side, price, atr):
+    data = calculate_trade(symbol, price, atr, side)
+
+    if not data:
+        return
+
+    qty, sl, tp = data
 
     try:
         print(f"🚀 {side} {symbol} | Qty: {qty}")
@@ -109,9 +123,6 @@ def open_trade(symbol, side, price):
             type=ORDER_TYPE_MARKET,
             quantity=qty
         )
-
-        sl = price * 0.997 if side == "LONG" else price * 1.003
-        tp = price * 1.004 if side == "LONG" else price * 0.996
 
         client.futures_create_order(
             symbol=symbol,
@@ -129,34 +140,29 @@ def open_trade(symbol, side, price):
             closePosition=True
         )
 
-        send(f"{side} {symbol} | Qty: {qty}")
+        print(f"✅ Trade abierto | SL: {sl:.4f} | TP: {tp:.4f}")
 
     except Exception as e:
-        print(f"❌ ERROR ORDEN {symbol}: {e}")
-        send(f"❌ Error {symbol}: {e}")
+        print(f"❌ ERROR {symbol}: {e}")
 
 # ===== LÓGICA =====
 def check_signal(df):
     last = df.iloc[-1]
 
-    if math.isnan(last["rsi"]):
+    if math.isnan(last["rsi"]) or math.isnan(last["atr"]):
         return None
 
-    price = last["close"]
-
-    if last["ema20"] > last["ema50"] and price > last["ema20"] and last["rsi"] > 50:
+    if last["ema20"] > last["ema50"] and last["rsi"] > 50:
         return "LONG"
 
-    if last["ema20"] < last["ema50"] and price < last["ema20"] and last["rsi"] < 50:
+    if last["ema20"] < last["ema50"] and last["rsi"] < 50:
         return "SHORT"
 
     return None
 
 # ===== LOOP =====
 def run():
-    print("🚀 BOT SCALPING EN RAILWAY")
-
-    test_api()
+    print("🚀 BOT PRO ACTIVO (RIESGO REAL $1)")
 
     while True:
         for symbol in SYMBOLS:
@@ -168,10 +174,12 @@ def run():
 
                 if signal and not get_position(symbol):
                     price = df.iloc[-1]["close"]
-                    open_trade(symbol, signal, price)
+                    atr = df.iloc[-1]["atr"]
+
+                    open_trade(symbol, signal, price, atr)
 
             except Exception as e:
-                print(f"❌ LOOP ERROR {symbol}: {e}")
+                print(f"❌ LOOP {symbol}: {e}")
 
         time.sleep(15)
 
