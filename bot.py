@@ -1,25 +1,29 @@
-import time
-import requests
+from binance.client import Client
+from binance.enums import *
 
-TELEGRAM_TOKEN = "TU_TOKEN"
-CHAT_ID = "TU_CHAT_ID"
+API_KEY = "TU_API_KEY"
+API_SECRET = "TU_API_SECRET"
 
-def send(msg):
-    print(f"📩 {msg}")
+client = Client(API_KEY, API_SECRET)
+
+SYMBOL = "XRPUSDT"
+
+def test_order():
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        print("🚀 Enviando orden REAL...")
+
+        order = client.futures_create_order(
+            symbol=SYMBOL,
+            side=SIDE_BUY,
+            type=ORDER_TYPE_MARKET,
+            quantity=5  # pequeño
+        )
+
+        print("✅ ORDEN EJECUTADA")
+        print(order)
+
     except Exception as e:
-        print(f"❌ Telegram error: {e}")
-
-def run():
-    print("🚀 BOT TEST INICIADO")
-    send("✅ BOT FUNCIONANDO")
-
-    while True:
-        print("🔁 Loop activo...")
-        send("ping")
-        time.sleep(10)
+        print(f"❌ ERROR REAL: {e}")
 
 if __name__ == "__main__":
-    run()
+    test_order()
