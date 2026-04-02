@@ -6,11 +6,11 @@ from datetime import datetime
 import math
 
 # ===== CONFIG =====
-API_KEY = "4j8dMbSNzJUdYecnZhsPAyqV5TYdZycvmd9RSNPBuUdzMyC8LkhD4n3Zg3enEHxD".strip()
-API_SECRET = "9DSGmVB5kvIYDvngB9X16BO62ASQwozngCTroDP2eEBA6ie7IVn8354kItF7wEEJ".strip()
+API_KEY = "xxxxx".strip()
+API_SECRET = "xxxx".strip()
 
-TELEGRAM_TOKEN = "8541274469:AAE4b38i0W6OuirqKUi6x9TOES-zxILTwfU"
-CHAT_ID = "392160869"
+TELEGRAM_TOKEN = "xxxx"
+CHAT_ID = "xxxx"
 
 SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT"]
 
